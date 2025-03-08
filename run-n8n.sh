@@ -7,6 +7,20 @@ N8N_PORT=5678
 N8N_URL="http://localhost:$N8N_PORT"
 N8N_DIR=$(dirname "$0")
 
+# Global variables to store system status
+STATUS_NODEJS=""
+STATUS_NVM=""
+STATUS_OLLAMA=""
+STATUS_OLLAMA_RUNNING=""
+STATUS_OLLAMA_MODELS=""
+STATUS_CHROME=""
+STATUS_CURL=""
+STATUS_JQ=""
+STATUS_INTERNET=""
+STATUS_LAST_SCAN=""
+N8N_RUNNING=false
+N8N_PID=""
+
 # Function to find and source nvm
 load_nvm() {
   # Common nvm locations to try
@@ -43,6 +57,126 @@ load_nvm() {
   done
   
   return 1
+}
+
+# Function to scan system for all required components
+system_status_scan() {
+  echo "🔍 Scanning system components..."
+  
+  # Check internet connectivity
+  if ping -c 1 google.com &>/dev/null || ping -c 1 github.com &>/dev/null; then
+    STATUS_INTERNET="✅ Connected"
+  else
+    STATUS_INTERNET="❌ Not connected or limited"
+  fi
+
+  # Check curl
+  if command -v curl &>/dev/null; then
+    local curl_version=$(curl --version | head -n 1 | cut -d ' ' -f 2)
+    STATUS_CURL="✅ Installed ($curl_version)"
+  else
+    STATUS_CURL="❌ Not installed"
+  fi
+
+  # Check jq
+  if command -v jq &>/dev/null; then
+    local jq_version=$(jq --version 2>&1 | cut -d '-' -f 2)
+    STATUS_JQ="✅ Installed ($jq_version)"
+  else
+    STATUS_JQ="⚠️ Not installed (optional)"
+  fi
+
+  # Check Node.js
+  if command -v node &>/dev/null; then
+    local node_version=$(node -v 2>/dev/null | sed 's/v//')
+    if is_supported_version "$node_version"; then
+      STATUS_NODEJS="✅ v$node_version (compatible)"
+    else
+      STATUS_NODEJS="⚠️ v$node_version (not compatible)"
+    fi
+  else
+    STATUS_NODEJS="❌ Not installed"
+  fi
+
+  # Check nvm
+  if command -v nvm &>/dev/null || [ -f "$HOME/.nvm/nvm.sh" ]; then
+    STATUS_NVM="✅ Installed"
+  else
+    STATUS_NVM="❌ Not installed"
+  fi
+
+  # Check Chrome
+  if check_chrome_installed; then
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      # macOS - try to get version more precisely
+      local chrome_version=$(/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version 2>/dev/null | cut -d ' ' -f 3)
+      STATUS_CHROME="✅ Installed ($chrome_version)"
+    else
+      STATUS_CHROME="✅ Installed"
+    fi
+  else
+    STATUS_CHROME="⚠️ Not installed (using default browser)"
+  fi
+
+  # Check Ollama installed
+  if command -v ollama &>/dev/null; then
+    local ollama_version=$(ollama --version 2>&1 | head -n 1)
+    STATUS_OLLAMA="✅ Installed ($ollama_version)"
+    
+    # Check Ollama running
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      STATUS_OLLAMA_RUNNING="✅ Running"
+      
+      # Check Ollama models
+      local models_json=$(curl -s --max-time 2 "${OLLAMA_API_URL}/tags")
+      if [ -n "$models_json" ]; then
+        if command -v jq &>/dev/null; then
+          local model_count=$(echo "$models_json" | jq -r '.models | length')
+          STATUS_OLLAMA_MODELS="✅ $model_count models available"
+        else
+          STATUS_OLLAMA_MODELS="✅ Models available"
+        fi
+      else
+        STATUS_OLLAMA_MODELS="⚠️ No models found"
+      fi
+    else
+      STATUS_OLLAMA_RUNNING="❌ Not running"
+      STATUS_OLLAMA_MODELS="❓ Unknown (Ollama not running)"
+    fi
+  else
+    STATUS_OLLAMA="❌ Not installed"
+    STATUS_OLLAMA_RUNNING="❓ N/A"
+    STATUS_OLLAMA_MODELS="❓ N/A"
+  fi
+
+  # Update last scan time
+  STATUS_LAST_SCAN=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  echo "✅ System scan complete!"
+}
+
+# Function to display system status in compact dashboard format
+display_system_status() {
+  clear
+  echo "╔════════════ n8n System Status Dashboard ════════════╗"
+  echo "║                                                     ║"
+  printf "║  %-13s %-35s ║\n" "Node.js:" "$STATUS_NODEJS"
+  printf "║  %-13s %-35s ║\n" "nvm:" "$STATUS_NVM"
+  printf "║  %-13s %-35s ║\n" "Ollama:" "$STATUS_OLLAMA"
+  printf "║  %-13s %-35s ║\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+  printf "║  %-13s %-35s ║\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+  printf "║  %-13s %-35s ║\n" "Chrome:" "$STATUS_CHROME"
+  printf "║  %-13s %-35s ║\n" "curl:" "$STATUS_CURL"
+  printf "║  %-13s %-35s ║\n" "jq:" "$STATUS_JQ"
+  printf "║  %-13s %-35s ║\n" "Internet:" "$STATUS_INTERNET"
+  echo "║                                                     ║"
+  printf "║  %-13s %-35s ║\n" "Last scan:" "$STATUS_LAST_SCAN"
+  echo "║                                                     ║"
+  echo "╚═════════════════════════════════════════════════════╝"
+  echo ""
+  echo "Press Enter to return to menu..."
+  read -r
+  show_interactive_menu
 }
 
 # Function to check if version is supported
@@ -401,22 +535,17 @@ just_make_it_work() {
     fi
   fi
   
-  # Run n8n in the background and open browser
-  echo "🚀 Starting n8n..."
-  n8n start &
-  N8N_PID=$!
-  
-  # Open in browser
-  open_n8n_in_browser
-  
-  # Wait for n8n process to complete
-  wait $N8N_PID
-  
-  exit 0
+  # Start n8n with control menu instead of waiting for process
+  start_n8n_with_control_menu
 }
 
 # Function to show an interactive menu (compact version)
 show_interactive_menu() {
+  # Run system scan if it hasn't been run yet
+  if [ -z "$STATUS_LAST_SCAN" ]; then
+    system_status_scan > /dev/null 2>&1
+  fi
+  
   clear
   echo "╔══════════════════ n8n Launcher Menu ═══════════════════╗"
   echo "║                                                        ║"
@@ -425,11 +554,17 @@ show_interactive_menu() {
   echo "║  3) 🧹 Clean package-lock.json files                   ║"
   echo "║  4) 📦 Regenerate package-lock.json files              ║"
   echo "║  5) 🧼 Prepare for Git commit - Clean generated files  ║"
-  echo "║  6) ℹ️  Show help - Display command line options        ║"
+  echo "║  6) 🔍 System Status Dashboard                         ║"
+  echo "║  7) ℹ️  Show help - Display command line options        ║"
   echo "║  0) ❌ Exit                                            ║"
   echo "║                                                        ║"
   echo "╚════════════════════════════════════════════════════════╝"
-  echo -n "Enter your choice [0-6]: "
+  
+  # Show mini status summary
+  echo ""
+  echo "System Status: Node.js ${STATUS_NODEJS:3:30} | Ollama ${STATUS_OLLAMA_RUNNING:3:10}"
+  echo ""
+  echo -n "Enter your choice [0-7]: "
   read -r choice
 
   case $choice in
@@ -457,6 +592,11 @@ show_interactive_menu() {
       show_interactive_menu
       ;;
     6)
+      echo "Refreshing system status..."
+      system_status_scan
+      display_system_status
+      ;;
+    7)
       clear
       show_help
       echo -n "Press Enter to return to menu..."
@@ -530,17 +670,146 @@ run_normal_flow() {
     fi
   fi
 
-  # Run n8n with the correct Node.js version and open browser
+  # Start n8n with control menu instead of waiting for process
+  start_n8n_with_control_menu
+}
+
+# Function to start n8n and show control menu
+start_n8n_with_control_menu() {
+  # Start n8n in the background
   echo "🚀 Starting n8n..."
   n8n start &
   N8N_PID=$!
-
+  N8N_RUNNING=true
+  
+  # Wait a moment for n8n to start
+  sleep 2
+  
   # Open in browser
   open_n8n_in_browser
-
-  # Wait for n8n process to complete
-  wait $N8N_PID
+  
+  # Show control menu
+  show_n8n_control_menu
 }
+
+# Function to show the n8n control menu while n8n is running
+show_n8n_control_menu() {
+  clear
+  echo "╔══════════════════ n8n Control Panel ════════════════════╗"
+  echo "║                                                         ║"
+  echo "║  n8n server is running in the background                ║"
+  echo "║  Web UI is available at: $N8N_URL                  ║"
+  echo "║                                                         ║"
+  echo "╚═════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "Options:"
+  echo "1) 🔄 Refresh browser"
+  echo "2) 🔍 View system status"
+  echo "0) ⏹️  Stop n8n and return to main menu"
+  echo ""
+  echo -n "Enter your choice [0-2]: "
+  read -r control_choice
+
+  case $control_choice in
+    1)
+      echo "Reopening n8n in browser..."
+      open_n8n_in_browser
+      show_n8n_control_menu
+      ;;
+    2)
+      echo "Refreshing system status..."
+      system_status_scan
+      display_system_status_while_running
+      ;;
+    0)
+      echo "Stopping n8n server..."
+      stop_n8n
+      echo "Returning to main menu..."
+      show_interactive_menu
+      ;;
+    *)
+      echo "Invalid choice. Press Enter to try again..."
+      read -r
+      show_n8n_control_menu
+      ;;
+  esac
+}
+
+# Function to display system status while n8n is running
+display_system_status_while_running() {
+  clear
+  echo "╔════════════ n8n System Status Dashboard ════════════╗"
+  echo "║                                                     ║"
+  printf "║  %-13s %-35s ║\n" "Node.js:" "$STATUS_NODEJS"
+  printf "║  %-13s %-35s ║\n" "nvm:" "$STATUS_NVM"
+  printf "║  %-13s %-35s ║\n" "Ollama:" "$STATUS_OLLAMA"
+  printf "║  %-13s %-35s ║\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+  printf "║  %-13s %-35s ║\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+  printf "║  %-13s %-35s ║\n" "Chrome:" "$STATUS_CHROME"
+  printf "║  %-13s %-35s ║\n" "curl:" "$STATUS_CURL"
+  printf "║  %-13s %-35s ║\n" "jq:" "$STATUS_JQ"
+  printf "║  %-13s %-35s ║\n" "Internet:" "$STATUS_INTERNET"
+  echo "║                                                     ║"
+  printf "║  %-13s %-35s ║\n" "Last scan:" "$STATUS_LAST_SCAN"
+  echo "║                                                     ║"
+  echo "║  n8n Server:   ✅ Running (PID: $N8N_PID)           ║"
+  echo "║                                                     ║"
+  echo "╚═════════════════════════════════════════════════════╝"
+  echo ""
+  echo "Press Enter to return to n8n control panel..."
+  read -r
+  show_n8n_control_menu
+}
+
+# Function to gracefully stop n8n
+stop_n8n() {
+  if [ -n "$N8N_PID" ] && ps -p $N8N_PID > /dev/null; then
+    echo "Stopping n8n process (PID: $N8N_PID)..."
+    
+    # Try graceful shutdown first with n8n CLI if possible
+    if command -v n8n &>/dev/null; then
+      n8n stop &>/dev/null || true
+    fi
+
+    # If still running, send SIGTERM
+    if ps -p $N8N_PID > /dev/null; then
+      kill $N8N_PID &>/dev/null || true
+      sleep 1
+    fi
+    
+    # If still running, force kill
+    if ps -p $N8N_PID > /dev/null; then
+      kill -9 $N8N_PID &>/dev/null || true
+    fi
+    
+    N8N_RUNNING=false
+    echo "✅ n8n stopped"
+  else
+    echo "n8n is not running"
+  fi
+}
+
+# Set up trap to handle Ctrl+C in a more friendly way
+trap handle_interrupt INT
+
+# Function to handle interrupt signal (Ctrl+C)
+handle_interrupt() {
+  echo ""
+  echo "⚠️ Interrupt detected"
+  
+  if [ "$N8N_RUNNING" = true ]; then
+    echo "Stopping n8n gracefully..."
+    stop_n8n
+    echo "Returning to menu..."
+    show_interactive_menu
+  else
+    echo "Exiting script..."
+    exit 0
+  fi
+}
+
+# Initial system scan (silent)
+system_status_scan > /dev/null 2>&1
 
 # Process command line arguments
 if [ $# -eq 0 ]; then
