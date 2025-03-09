@@ -13,6 +13,7 @@ STATUS_NVM=""
 STATUS_OLLAMA=""
 STATUS_OLLAMA_RUNNING=""
 STATUS_OLLAMA_MODELS=""
+STATUS_OLLAMA_MODEL_LIST=()  # Array to store actual model names
 STATUS_CHROME=""
 STATUS_CURL=""
 STATUS_JQ=""
@@ -130,23 +131,40 @@ system_status_scan() {
       # Check Ollama models
       local models_json=$(curl -s --max-time 2 "${OLLAMA_API_URL}/tags")
       if [ -n "$models_json" ]; then
+        # Clear the existing model list
+        STATUS_OLLAMA_MODEL_LIST=()
+        
         if command -v jq &>/dev/null; then
           local model_count=$(echo "$models_json" | jq -r '.models | length')
           STATUS_OLLAMA_MODELS="✅ $model_count models available"
+          
+          # Extract model names to the array
+          while IFS= read -r model_name; do
+            STATUS_OLLAMA_MODEL_LIST+=("$model_name")
+          done < <(echo "$models_json" | jq -r '.models[].name')
         else
           STATUS_OLLAMA_MODELS="✅ Models available"
+          # Basic extraction without jq
+          while IFS= read -r line; do
+            if [[ "$line" =~ \"name\":\"([^\"]+)\" ]]; then
+              STATUS_OLLAMA_MODEL_LIST+=("${BASH_REMATCH[1]}")
+            fi
+          done < <(echo "$models_json" | grep -o '"name":"[^"]*"')
         fi
       else
         STATUS_OLLAMA_MODELS="⚠️ No models found"
+        STATUS_OLLAMA_MODEL_LIST=()
       fi
     else
       STATUS_OLLAMA_RUNNING="❌ Not running"
       STATUS_OLLAMA_MODELS="❓ Unknown (Ollama not running)"
+      STATUS_OLLAMA_MODEL_LIST=()
     fi
   else
     STATUS_OLLAMA="❌ Not installed"
     STATUS_OLLAMA_RUNNING="❓ N/A"
     STATUS_OLLAMA_MODELS="❓ N/A"
+    STATUS_OLLAMA_MODEL_LIST=()
   fi
 
   # Update last scan time
@@ -158,21 +176,46 @@ system_status_scan() {
 # Function to display system status in compact dashboard format
 display_system_status() {
   clear
-  echo "╔════════════ n8n System Status Dashboard ════════════╗"
-  echo "║                                                     ║"
-  printf "║  %-13s %-35s ║\n" "Node.js:" "$STATUS_NODEJS"
-  printf "║  %-13s %-35s ║\n" "nvm:" "$STATUS_NVM"
-  printf "║  %-13s %-35s ║\n" "Ollama:" "$STATUS_OLLAMA"
-  printf "║  %-13s %-35s ║\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
-  printf "║  %-13s %-35s ║\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
-  printf "║  %-13s %-35s ║\n" "Chrome:" "$STATUS_CHROME"
-  printf "║  %-13s %-35s ║\n" "curl:" "$STATUS_CURL"
-  printf "║  %-13s %-35s ║\n" "jq:" "$STATUS_JQ"
-  printf "║  %-13s %-35s ║\n" "Internet:" "$STATUS_INTERNET"
-  echo "║                                                     ║"
-  printf "║  %-13s %-35s ║\n" "Last scan:" "$STATUS_LAST_SCAN"
-  echo "║                                                     ║"
-  echo "╚═════════════════════════════════════════════════════╝"
+  echo "========================================================"
+  echo "               n8n System Status Dashboard               "
+  echo "========================================================"
+  echo ""
+  echo "SYSTEM COMPONENTS:"
+  printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+  printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+  printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+  printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+  printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+  printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+  
+  echo ""
+  echo "AI ASSISTANT STATUS:"
+  printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+  printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+  printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+  
+  # Display model list if any models are available
+  if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+    echo ""
+    echo "  Available Ollama models:"
+    local count=0
+    for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+      printf "    • %s\n" "$model"
+      ((count++))
+      # After showing 10 models, summarize the rest
+      if [ $count -eq 10 ] && [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 10 ]; then
+        remaining=$((${#STATUS_OLLAMA_MODEL_LIST[@]} - 10))
+        printf "    • ... and %d more model(s)\n" "$remaining"
+        break
+      fi
+    done
+  fi
+  
+  echo ""
+  echo "TIMESTAMP:"
+  printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+  echo ""
+  echo "========================================================"
   echo ""
   echo "Press Enter to return to menu..."
   read -r
@@ -738,23 +781,50 @@ show_n8n_control_menu() {
 # Function to display system status while n8n is running
 display_system_status_while_running() {
   clear
-  echo "╔════════════ n8n System Status Dashboard ════════════╗"
-  echo "║                                                     ║"
-  printf "║  %-13s %-35s ║\n" "Node.js:" "$STATUS_NODEJS"
-  printf "║  %-13s %-35s ║\n" "nvm:" "$STATUS_NVM"
-  printf "║  %-13s %-35s ║\n" "Ollama:" "$STATUS_OLLAMA"
-  printf "║  %-13s %-35s ║\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
-  printf "║  %-13s %-35s ║\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
-  printf "║  %-13s %-35s ║\n" "Chrome:" "$STATUS_CHROME"
-  printf "║  %-13s %-35s ║\n" "curl:" "$STATUS_CURL"
-  printf "║  %-13s %-35s ║\n" "jq:" "$STATUS_JQ"
-  printf "║  %-13s %-35s ║\n" "Internet:" "$STATUS_INTERNET"
-  echo "║                                                     ║"
-  printf "║  %-13s %-35s ║\n" "Last scan:" "$STATUS_LAST_SCAN"
-  echo "║                                                     ║"
-  echo "║  n8n Server:   ✅ Running (PID: $N8N_PID)           ║"
-  echo "║                                                     ║"
-  echo "╚═════════════════════════════════════════════════════╝"
+  echo "========================================================"
+  echo "               n8n System Status Dashboard               "
+  echo "========================================================"
+  echo ""
+  echo "SYSTEM COMPONENTS:"
+  printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+  printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+  printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+  printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+  printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+  printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+  
+  echo ""
+  echo "AI ASSISTANT STATUS:"
+  printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+  printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+  printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+  
+  # Display model list if any models are available
+  if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+    echo ""
+    echo "  Available Ollama models:"
+    local count=0
+    for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+      printf "    • %s\n" "$model"
+      ((count++))
+      # After showing 10 models, summarize the rest
+      if [ $count -eq 10 ] && [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 10 ]; then
+        remaining=$((${#STATUS_OLLAMA_MODEL_LIST[@]} - 10))
+        printf "    • ... and %d more model(s)\n" "$remaining"
+        break
+      fi
+    done
+  fi
+  
+  echo ""
+  echo "N8N SERVICE:"
+  printf "  %-15s %s\n" "n8n Server:" "✅ Running (PID: $N8N_PID)"
+  
+  echo ""
+  echo "TIMESTAMP:"
+  printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+  echo ""
+  echo "========================================================"
   echo ""
   echo "Press Enter to return to n8n control panel..."
   read -r

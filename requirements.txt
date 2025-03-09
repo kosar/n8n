@@ -1,0 +1,6 @@
+ollama
+rich
+prompt_toolkit
+requests
+pdf2image
+pillow
