@@ -15,11 +15,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from rich.syntax import Syntax
+from rich.layout import Layout
+from rich.live import Live
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import PathCompleter
 from prompt_toolkit.shortcuts import clear
 import readline
 import glob
+import signal
 
 # Try to import PDF processing libraries
 try:
@@ -38,12 +41,44 @@ PDF_DPI = 150  # DPI for PDF to image conversion
 # Initialize Rich console
 console = Console()
 
+# Layout components
+layout = Layout()
+layout.split(
+    Layout(name="header", size=10),  # Increased size for header
+    Layout(name="body"),            # Scrollable content area
+)
+layout["header"].split_row(
+    Layout(name="status", ratio=3),
+    Layout(name="menu", ratio=2),
+)
+
+def update_layout(current_directory: str, selected_files: Set[str], prompt: str, model: str):
+    """Update the fixed header with current status and menu"""
+    # Status panel
+    status_content = f"[blue]Current directory:[/blue] {current_directory}\n"
+    status_content += f"[blue]Selected files:[/blue] {len(selected_files)}\n"
+    status_content += f"[blue]Current model:[/blue] {model}\n"
+    status_content += f"[blue]Current prompt:[/blue] {prompt}"
+    
+    layout["status"].update(Panel(status_content, title="Status", border_style="blue"))
+
+    # Menu panel
+    menu_content = "[bold cyan]Menu Options:[/bold cyan]\n"
+    menu_content += "  1. Change directory\n"
+    menu_content += "  2. View and select image files\n"
+    menu_content += "  3. Process selected images\n"
+    menu_content += "  4. Change prompt\n"
+    menu_content += "  5. Change model\n"
+    menu_content += "  6. Exit"
+    
+    layout["menu"].update(Panel(menu_content, title="Menu", border_style="cyan"))
+
 def banner():
     """Display the application banner"""
-    console.print(Panel.fit(
+    return Panel.fit(
         "[bold blue]Vision Explorer[/bold blue] - Interactive Ollama Vision Model Interface",
         border_style="green"
-    ))
+    )
 
 def is_image_file(file_path: str) -> bool:
     """Check if a file is a supported image type"""
@@ -107,8 +142,8 @@ def save_result(image_path: str, result: str) -> str:
         f.write(result)
     return result_path
 
-def display_directory_contents(current_dir: str, selected_files: Set[str]) -> None:
-    """Display directory contents with image files highlighted"""
+def display_directory_contents(current_dir: str, selected_files: Set[str]) -> Table:
+    """Display directory contents with image files highlighted and return a table"""
     all_files = os.listdir(current_dir)
     
     image_files = [f for f in all_files if is_image_file(os.path.join(current_dir, f))]
@@ -139,7 +174,7 @@ def display_directory_contents(current_dir: str, selected_files: Set[str]) -> No
         status = "[bold yellow]Selected[/bold yellow]" if file_path in selected_files else ""
         table.add_row("📄", item, status)
     
-    console.print(table)
+    return table
 
 async def convert_pdf_to_images(pdf_path: str, progress_callback=None) -> List[str]:
     """Convert PDF to images and return paths to created images"""
@@ -461,6 +496,9 @@ async def process_images(image_paths: List[str], prompt: str, model: str) -> Non
 
 async def interactive_directory_browser(start_dir: str = os.getcwd()) -> str:
     """Interactive directory browser with autocomplete"""
+    console.clear()
+    console.print(banner())
+    
     session = PromptSession()
     completer = PathCompleter(
         only_directories=True,
@@ -623,51 +661,31 @@ def check_requirements():
     """Check if required packages are installed and Ollama is running"""
     global DEFAULT_MODEL
     
+    # Store requirement check results to display later
+    check_results = []
+    
     # Check for PDF support
     if not PDF_SUPPORT:
-        console.print("[yellow]PDF support not available. Install pdf2image and pillow packages:[/yellow]")
-        console.print("[blue]pip install pdf2image pillow[/blue]")
+        check_results.append("[yellow]PDF support not available. Install pdf2image and pillow packages:[/yellow]")
+        check_results.append("[blue]pip install pdf2image pillow[/blue]")
     else:
-        console.print("[green]✓ PDF conversion support available[/green]")
+        check_results.append("[green]✓ PDF conversion support available[/green]")
     
     try:
         # Check if Ollama is running
         try:
             ollama.list()
-            console.print("[green]✓ Connected to Ollama successfully[/green]")
+            check_results.append("[green]✓ Connected to Ollama successfully[/green]")
         except Exception as e:
-            console.print(f"[bold red]Error: Could not connect to Ollama: {str(e)}[/bold red]")
-            console.print("[yellow]Make sure Ollama is installed and running.[/yellow]")
-            console.print("[blue]Installation instructions: https://ollama.com/download[/blue]")
+            check_results.append(f"[bold red]Error: Could not connect to Ollama: {str(e)}[/bold red]")
+            check_results.append("[yellow]Make sure Ollama is installed and running.[/yellow]")
+            check_results.append("[blue]Installation instructions: https://ollama.com/download[/blue]")
+            console.print("\n".join(check_results))
             sys.exit(1)
-            
-        # Debug: List all available models to help troubleshoot
-        debug_list_available_models()
-        
-        # Fallback to direct API check first
-        try:
-            import requests
-            console.print(f"[yellow]Checking if {DEFAULT_MODEL} is available via direct API...[/yellow]")
-            response = requests.post(
-                "http://localhost:11434/api/chat",
-                json={
-                    "model": DEFAULT_MODEL,
-                    "messages": [{"role": "user", "content": "Hello"}]
-                }
-            )
-            if response.status_code == 200:
-                console.print(f"[green]✓ Direct API confirms {DEFAULT_MODEL} is available[/green]")
-                return  # Skip further checks if model works via direct API
-            else:
-                console.print(f"[yellow]Model not available via direct API: {response.text}[/yellow]")
-        except ImportError:
-            console.print("[yellow]Note: Install 'requests' module for better model checking[/yellow]")
-        except Exception as e:
-            console.print(f"[yellow]Direct API check failed: {e}[/yellow]")
             
         # Check for the exact vision model
         if check_ollama_model(DEFAULT_MODEL):
-            console.print(f"[green]✓ {DEFAULT_MODEL} model is available[/green]")
+            check_results.append(f"[green]✓ {DEFAULT_MODEL} model is available[/green]")
         else:
             # Try alternate model names
             alternate_models = ['llama3.2-vision:latest', 'llama3.2-vision', 'llama3-vision']
@@ -675,27 +693,32 @@ def check_requirements():
             found_alt = False
             for alt_model in alternate_models:
                 if alt_model != DEFAULT_MODEL and check_ollama_model(alt_model):
-                    console.print(f"[yellow]! {DEFAULT_MODEL} not found, but {alt_model} is available[/yellow]")
+                    check_results.append(f"[yellow]! {DEFAULT_MODEL} not found, but {alt_model} is available[/yellow]")
+                    console.print("\n".join(check_results))
                     if Confirm.ask(f"Would you like to use {alt_model} instead?"):
                         DEFAULT_MODEL = alt_model
-                        console.print(f"[green]✓ Using {alt_model} model instead[/green]")
+                        check_results.append(f"[green]✓ Using {alt_model} model instead[/green]")
                         found_alt = True
                         break
             
             if not found_alt:
-                console.print(f"[yellow]! {DEFAULT_MODEL} model not found. You may need to run:[/yellow]")
-                console.print(f"[blue]  ollama pull {DEFAULT_MODEL}[/blue]")
+                check_results.append(f"[yellow]! {DEFAULT_MODEL} model not found. You may need to run:[/yellow]")
+                check_results.append(f"[blue]  ollama pull {DEFAULT_MODEL}[/blue]")
+                console.print("\n".join(check_results))
                 if not Confirm.ask("Continue anyway?"):
                     sys.exit(1)
                     
     except Exception as e:
-        console.print(f"[bold red]Unexpected error: {str(e)}[/bold red]")
+        check_results.append(f"[bold red]Unexpected error: {str(e)}[/bold red]")
+        console.print("\n".join(check_results))
         sys.exit(1)
+    
+    return check_results
 
-def display_selected_files(selected_files: Set[str]) -> None:
-    """Display the currently selected files in a nice format"""
+def display_selected_files(selected_files: Set[str]) -> Table:
+    """Display the currently selected files in a nice format and return a table"""
     if not selected_files:
-        return
+        return None
         
     # Group files by directory for cleaner display
     files_by_dir = {}
@@ -733,40 +756,81 @@ def display_selected_files(selected_files: Set[str]) -> None:
             
         table.add_row(dir_display, files_display)
         
-    console.print(table)
+    return table
 
 async def main():
-    """Main application loop"""
+    """Main application loop with fixed header and scrollable content"""
     clear()
-    banner()
-    check_requirements()
+    console.print(banner())
     
+    # Check requirements first but don't display results yet
+    requirement_results = check_requirements()
+    
+    # Set up initial state
     current_directory = os.getcwd()
     selected_files: Set[str] = set()
     prompt = DEFAULT_PROMPT
     model = DEFAULT_MODEL
     
+    # Handle SIGINT (Ctrl+C) to exit cleanly
+    signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
+    
+    # Create a separate console for rendering status that won't get cleared
+    status_console = Console()
+    
     while True:
-        console.rule("[bold blue]Vision Explorer Menu[/bold blue]")
-        console.print(f"[blue]Current directory:[/blue] {current_directory}")
-        console.print(f"[blue]Selected files:[/blue] {len(selected_files)}")
-        console.print(f"[blue]Current model:[/blue] {model}")
-        console.print(f"[blue]Current prompt:[/blue] {prompt}")
+        # Clear screen
+        clear()
         
-        # Display selected files if there are any
+        # Always show the banner
+        console.print(banner())
+        
+        # Display status section (fixed)
+        console.print(Panel(
+            f"[blue]Current directory:[/blue] {current_directory}\n"
+            f"[blue]Selected files:[/blue] {len(selected_files)}\n"
+            f"[blue]Current model:[/blue] {model}\n"
+            f"[blue]Current prompt:[/blue] {prompt}",
+            title="Status", 
+            border_style="blue"
+        ))
+        
+        # Display menu section (fixed)
+        console.print(Panel(
+            "[bold cyan]Menu Options:[/bold cyan]\n"
+            "  1. Change directory\n"
+            "  2. View and select image files\n"
+            "  3. Process selected images\n"
+            "  4. Change prompt\n"
+            "  5. Change model\n"
+            "  6. Exit",
+            title="Menu",
+            border_style="cyan"
+        ))
+        
+        # Display horizontal rule to separate fixed and scrollable sections
+        console.rule("[bold yellow]Scrollable Content Below[/bold yellow]")
+        
+        # Display selected files if any
         if selected_files:
-            display_selected_files(selected_files)
+            selected_files_table = display_selected_files(selected_files)
+            if selected_files_table:
+                console.print(selected_files_table)
+        else:
+            # Show initial requirements or empty message
+            if requirement_results:
+                console.print(Panel("\n".join(requirement_results), 
+                                   title="Status Check Results", 
+                                   border_style="green"))
+                # Clear requirement results after first display
+                requirement_results = []
+            else:
+                console.print("[yellow]No files selected. Use options 1 and 2 to navigate and select files.[/yellow]")
         
-        console.print("\n[bold cyan]Menu Options:[/bold cyan]")
-        console.print("  1. Change directory")
-        console.print("  2. View and select image files")
-        console.print("  3. Process selected images")
-        console.print("  4. Change prompt")
-        console.print("  5. Change model")
-        console.print("  6. Exit")
-        
+        # Get user input - this is always visible at the bottom
         choice = Prompt.ask("\nSelect an option", choices=["1", "2", "3", "4", "5", "6"])
         
+        # Process user choice
         if choice == "1":
             # Change directory
             new_directory = await interactive_directory_browser(current_directory)
@@ -776,20 +840,32 @@ async def main():
         
         elif choice == "2":
             # View and select image files
-            display_directory_contents(current_directory, selected_files)
+            clear()
+            console.print(banner())
+            dir_table = display_directory_contents(current_directory, selected_files)
+            console.print(dir_table)
             selected_files = select_files(current_directory, selected_files)
+            console.print("\nPress Enter to continue...")
+            input()
         
         elif choice == "3":
             # Process selected images
             if not selected_files:
                 console.print("[yellow]No images selected. Please select images first.[/yellow]")
+                console.print("\nPress Enter to continue...")
+                input()
                 continue
                 
+            clear()
+            console.print(banner())
             await process_images(list(selected_files), prompt, model)
             
             # Ask if user wants to clear selection
             if Confirm.ask("Clear current file selection?"):
                 selected_files.clear()
+                
+            console.print("\nPress Enter to continue...")
+            input()
         
         elif choice == "4":
             # Change prompt
@@ -806,18 +882,13 @@ async def main():
             else:
                 console.print(f"[yellow]Model '{new_model}' not found. Please pull it first with:[/yellow]")
                 console.print(f"[blue]  ollama pull {new_model}[/blue]")
+                console.print("\nPress Enter to continue...")
+                input()
         
         elif choice == "6":
             # Exit
             console.print("[green]Exiting Vision Explorer. Goodbye![/green]")
             break
-        
-        # Pause briefly to let user see the output
-        if choice != "6":
-            console.print("\nPress Enter to continue...")
-            input()
-            clear()
-            banner()
 
 if __name__ == "__main__":
     try:

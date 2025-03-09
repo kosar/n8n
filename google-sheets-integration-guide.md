@@ -82,19 +82,20 @@ Now let's create a workflow that triggers when a new row is added to the "RobitI
 
 Your trigger node is now set up to detect when a new row is added to the "RobitIn" sheet.
 
-### Adding a Function Node to Add a Timestamp
+### Adding a Code Node to Add a Timestamp
 
-Next, let's add a Function node to prepare the data for writing to the "RobotOut" sheet:
+Next, let's add a Code node to prepare the data for writing to the "RobotOut" sheet:
 
 1. Click on the output of the Google Sheets Trigger node (the small circle on the right)
-2. Select **Function** in the node selector
-3. In the Function node, add this code:
+2. Search for "Code" and select it in the node selector
+3. In the Code node, ensure the "Language" is set to "JavaScript"
+4. In the JavaScript code section, add this code:
 ```javascript
 const newItem = items[0].json;
 newItem.Timestamp = new Date().toISOString();
 return { json: newItem };
 ```
-4. Click **Execute Node** to test the function
+5. Click **Execute Node** to test the function
 
 ### Adding the Google Sheets Node to Write Data
 
