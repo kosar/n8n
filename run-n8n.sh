@@ -19,8 +19,14 @@ STATUS_CURL=""
 STATUS_JQ=""
 STATUS_INTERNET=""
 STATUS_LAST_SCAN=""
+STATUS_N8N=""  # Added to track n8n version
+STATUS_N8N_UPDATE=""  # Added to track update availability
 N8N_RUNNING=false
 N8N_PID=""
+
+# Add n8n installation status tracking
+N8N_DATA_DIR="$HOME/.n8n"
+STATUS_N8N_INSTALLED=false
 
 # Function to find and source nvm
 load_nvm() {
@@ -167,6 +173,30 @@ system_status_scan() {
     STATUS_OLLAMA_MODEL_LIST=()
   fi
 
+  # Check n8n version
+  if command -v n8n &>/dev/null; then
+    local installed_version=$(n8n --version 2>/dev/null | sed 's/[^0-9\.]//g')
+    STATUS_N8N="✅ v$installed_version installed"
+    STATUS_N8N_UPDATE="unknown"
+    
+    # Try to check the latest version
+    if command -v npm &>/dev/null && [ -n "$STATUS_INTERNET" ] && [[ "$STATUS_INTERNET" == *"Connected"* ]]; then
+      local latest_version=$(npm view n8n version 2>/dev/null)
+      if [ -n "$latest_version" ]; then
+        if [ "$installed_version" != "$latest_version" ]; then
+          STATUS_N8N="⚠️ v$installed_version installed"
+          STATUS_N8N_UPDATE="v$latest_version available"
+        else
+          STATUS_N8N="✅ v$installed_version installed (up-to-date)"
+          STATUS_N8N_UPDATE="current"
+        fi
+      fi
+    fi
+  else
+    STATUS_N8N="❌ Not installed"
+    STATUS_N8N_UPDATE="not installed"
+  fi
+
   # Update last scan time
   STATUS_LAST_SCAN=$(date '+%Y-%m-%d %H:%M:%S')
   
@@ -187,6 +217,13 @@ display_system_status() {
   printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
   printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
   printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+  
+  echo ""
+  echo "N8N STATUS:"
+  printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+  if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+    printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+  fi
   
   echo ""
   echo "AI ASSISTANT STATUS:"
@@ -519,6 +556,9 @@ show_help() {
   echo "  --clean-locks          Remove all package-lock.json files"
   echo "  --regen-locks          Regenerate all package-lock.json files"
   echo "  --git-prep             Thoroughly clean up all generated files for git commit"
+  echo "  --update-n8n           Update n8n to the latest version"
+  echo "  --cleanup              Run n8n cleanup and optimization"
+  echo "  --reset-installation   Reset n8n installation (⚠️ DELETES ALL DATA)"
   echo "  --help                 Show this help message"
 }
 
@@ -599,15 +639,26 @@ show_interactive_menu() {
   echo "║  5) 🧼 Prepare for Git commit - Clean generated files  ║"
   echo "║  6) 🔍 System Status Dashboard                         ║"
   echo "║  7) ℹ️  Show help - Display command line options        ║"
+  echo "║  8) 🔄 Update n8n to the latest version               ║"
+  echo "║  9) 🧹 Run n8n cleanup and optimization               ║"
+  echo "║ 10) 🔄 Reset n8n installation (⚠️ DELETES ALL DATA)    ║"
   echo "║  0) ❌ Exit                                            ║"
   echo "║                                                        ║"
   echo "╚════════════════════════════════════════════════════════╝"
   
-  # Show mini status summary
+  # Show mini status summary with n8n version info
   echo ""
-  echo "System Status: Node.js ${STATUS_NODEJS:3:30} | Ollama ${STATUS_OLLAMA_RUNNING:3:10}"
+  echo -n "System Status: Node.js ${STATUS_NODEJS:3:30} | "
+  
+  # Show n8n version with update info if available
+  if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+    echo "n8n ${STATUS_N8N:3:20} (${STATUS_N8N_UPDATE})"
+  else
+    echo "n8n ${STATUS_N8N:3:30}"
+  fi
+  
   echo ""
-  echo -n "Enter your choice [0-7]: "
+  echo -n "Enter your choice [0-10]: "
   read -r choice
 
   case $choice in
@@ -642,6 +693,28 @@ show_interactive_menu() {
     7)
       clear
       show_help
+      echo -n "Press Enter to return to menu..."
+      read -r
+      show_interactive_menu
+      ;;
+    8)
+      echo "Checking n8n version and updating..."
+      check_n8n_version
+      update_n8n
+      echo -n "Press Enter to return to menu..."
+      read -r
+      show_interactive_menu
+      ;;
+    9)
+      echo "Running n8n cleanup and optimization..."
+      run_n8n_cleanup
+      echo -n "Press Enter to return to menu..."
+      read -r
+      show_interactive_menu
+      ;;
+    10)
+      echo "Resetting n8n installation..."
+      reset_n8n_installation
       echo -n "Press Enter to return to menu..."
       read -r
       show_interactive_menu
@@ -794,6 +867,13 @@ display_system_status_while_running() {
   printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
   
   echo ""
+  echo "N8N STATUS:"
+  printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+  if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+    printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+  fi
+  
+  echo ""
   echo "AI ASSISTANT STATUS:"
   printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
   printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
@@ -859,6 +939,282 @@ stop_n8n() {
   fi
 }
 
+# Function to check latest n8n version
+check_n8n_version() {
+  # Get locally installed version
+  local installed_version=""
+  if command -v n8n &>/dev/null; then
+    installed_version=$(n8n --version 2>/dev/null | sed 's/[^0-9\.]//g')
+  fi
+  
+  # Get latest version from npm
+  local latest_version=""
+  if command -v npm &>/dev/null; then
+    echo "Checking for latest n8n version from npm registry..."
+    latest_version=$(npm view n8n version 2>/dev/null)
+  fi
+  
+  echo "Installed version: ${installed_version:-Not installed}"
+  
+  if [ -n "$latest_version" ]; then
+    echo "Latest version: $latest_version"
+    
+    if [ -n "$installed_version" ] && [ "$installed_version" != "$latest_version" ]; then
+      echo "Update available: v$installed_version → v$latest_version"
+      return 1  # Update available
+    elif [ -n "$installed_version" ]; then
+      echo "✅ n8n is up-to-date"
+      return 0  # Up-to-date
+    fi
+  fi
+  
+  return 2  # Status unknown
+}
+
+# Function to update n8n
+update_n8n() {
+  echo "🔄 Updating n8n to the latest version..."
+  
+  # Check internet connectivity first
+  if ! ping -c 1 google.com &>/dev/null && ! ping -c 1 github.com &>/dev/null; then
+    echo "❌ No internet connection detected. Update aborted."
+    return 1
+  fi
+  
+  # Make sure Node.js is available and in a compatible version
+  if ! command -v node &>/dev/null; then
+    echo "❌ Node.js not found. Please install Node.js first."
+    return 1
+  fi
+  
+  local node_version=$(node -v | sed 's/v//')
+  if ! is_supported_version "$node_version"; then
+    echo "⚠️ Warning: Node.js $node_version may not be fully compatible with n8n."
+    echo "Consider switching to version $RECOMMENDED_NODE_VERSION."
+    
+    # Attempt to switch Node.js version if nvm is available
+    if load_nvm; then
+      echo "Switching to Node.js $RECOMMENDED_NODE_VERSION..."
+      if ! nvm use $RECOMMENDED_NODE_VERSION &>/dev/null; then
+        echo "Installing Node.js $RECOMMENDED_NODE_VERSION..."
+        nvm install $RECOMMENDED_NODE_VERSION
+      fi
+      nvm use $RECOMMENDED_NODE_VERSION
+      node_version=$(node -v | sed 's/v//')
+      echo "Now using Node.js $node_version"
+    else
+      echo "Continue anyway? (y/n)"
+      read -r choice
+      if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+        echo "Update aborted."
+        return 1
+      fi
+    fi
+  fi
+  
+  # Check current installation method
+  local update_method="global"
+  if [ -f "$N8N_DIR/package.json" ] && grep -q '"name": "n8n"' "$N8N_DIR/package.json"; then
+    update_method="local"
+  fi
+  
+  # Get current version before update
+  local old_version=""
+  if command -v n8n &>/dev/null; then
+    old_version=$(n8n --version 2>/dev/null | sed 's/[^0-9\.]//g')
+    echo "Current version: v$old_version"
+  else
+    echo "n8n is not currently installed"
+  fi
+  
+  # Create temporary file to capture npm output
+  local tmp_output=$(mktemp)
+  
+  if [ "$update_method" = "global" ]; then
+    echo "Installing latest n8n version globally..."
+    # Capture both stdout and stderr from npm install
+    npm install -g n8n@latest 2>&1 | tee "$tmp_output"
+  else
+    echo "Installing latest n8n version in local directory..."
+    # Capture both stdout and stderr from npm install
+    (cd "$N8N_DIR" && npm install n8n@latest 2>&1 | tee "$tmp_output")
+  fi
+  
+  # Check for EBADENGINE warnings and extract required Node.js version
+  if grep -q "EBADENGINE" "$tmp_output"; then
+    echo ""
+    echo "⚠️ WARNING: Node.js version incompatibility detected!"
+    
+    # Try to extract the required Node.js version from the warning message
+    local required_version=$(grep -o "required:.*node: '>=.*'" "$tmp_output" | head -1 | grep -o ">=.*'" | tr -d "'," | cut -c3-)
+    
+    if [ -n "$required_version" ]; then
+      echo "📌 n8n components require Node.js $required_version or newer."
+      echo "   You're currently using Node.js $node_version"
+      
+      # Ask user if they want to upgrade Node.js version
+      echo ""
+      echo "Would you like to upgrade Node.js to version $required_version? (y/n)"
+      read -r node_upgrade_choice
+      
+      if [[ "$node_upgrade_choice" =~ ^[Yy]$ ]]; then
+        if load_nvm; then
+          echo "Installing Node.js $required_version..."
+          nvm install "$required_version"
+          nvm use "$required_version"
+          echo "✅ Node.js upgraded to $(node -v)"
+          echo "ℹ️ You should run n8n update again for best results."
+        else
+          echo "❌ Could not load nvm. Please upgrade Node.js manually."
+        fi
+      else
+        echo "ℹ️ Continuing with current Node.js version. Some features may not work correctly."
+      fi
+    fi
+  fi
+  
+  # Check for deprecated package warnings
+  if grep -q "deprecated" "$tmp_output"; then
+    echo ""
+    echo "ℹ️ Some packages used by n8n are deprecated. This is normal and doesn't affect functionality."
+  fi
+  
+  # Remove temporary file
+  rm -f "$tmp_output"
+  
+  # Verify the installation and version
+  if command -v n8n &>/dev/null; then
+    local new_version=$(n8n --version 2>/dev/null | sed 's/[^0-9\.]//g')
+    
+    if [ -n "$old_version" ] && [ "$old_version" != "$new_version" ]; then
+      echo "✅ n8n has been updated from v$old_version to v$new_version"
+      
+      # Offer to run post-update cleanup
+      echo ""
+      echo "Would you like to run post-update cleanup to remove unnecessary files? (y/n)"
+      read -r cleanup_choice
+      
+      if [[ "$cleanup_choice" =~ ^[Yy]$ ]]; then
+        run_n8n_cleanup
+      fi
+    elif [ -n "$old_version" ] && [ "$old_version" = "$new_version" ]; then
+      echo "⚠️ Update may have failed - version remains at v$old_version"
+      echo "Try running: sudo npm install -g n8n@latest"
+    else
+      echo "✅ n8n installed successfully (v$new_version)"
+    fi
+    
+    # Update status variables
+    system_status_scan > /dev/null 2>&1
+    return 0
+  else
+    echo "❌ Failed to update n8n"
+    return 1
+  fi
+}
+
+# Function to run n8n cleanup after update
+run_n8n_cleanup() {
+  echo "🧹 Running post-update cleanup..."
+  
+  # Clear npm cache
+  echo "Clearing npm cache..."
+  npm cache clean --force
+  
+  # Remove any unnecessary node_modules in n8n directories
+  if [ "$update_method" = "local" ] && [ -d "$N8N_DIR/node_modules" ]; then
+    echo "Optimizing node_modules..."
+    (cd "$N8N_DIR" && npm prune --production)
+  fi
+  
+  # Clean up temporary files
+  echo "Removing temporary files..."
+  
+  # Clean npm's temporary files
+  local npm_cache_dir="$HOME/.npm/_cacache"
+  if [ -d "$npm_cache_dir" ]; then
+    echo "Cleaning npm cache directory..."
+    find "$npm_cache_dir" -type f -name "*.lock" -delete
+  fi
+  
+  # Clear n8n's temporary directories if they exist
+  local n8n_temp_dirs=(".n8n/tmp" ".n8n/cache")
+  for dir in "${n8n_temp_dirs[@]}"; do
+    if [ -d "$HOME/$dir" ]; then
+      echo "Cleaning $HOME/$dir..."
+      rm -rf "$HOME/$dir"/*
+    fi
+  done
+  
+  echo "✅ Cleanup completed"
+}
+
+# Function to check if n8n is installed
+check_n8n_installation() {
+  if [ -d "$N8N_DATA_DIR" ] && [ -f "$N8N_DIR/node_modules/n8n/package.json" ]; then
+    STATUS_N8N_INSTALLED=true
+    return 0
+  else
+    STATUS_N8N_INSTALLED=false
+    return 1
+  fi
+}
+
+# Reset n8n installation
+reset_n8n_installation() {
+  echo -e "\n\033[1;31m⚠️  WARNING: You are about to completely reset your n8n installation! ⚠️\033[0m"
+  echo -e "\033[1;31mThis will delete all your workflows, credentials, and settings.\033[0m"
+  echo -e "\033[1;31mThis action CANNOT be undone!\033[0m"
+  
+  read -p "Type 'RESET' to confirm deletion or anything else to cancel: " confirmation
+  
+  if [ "$confirmation" == "RESET" ]; then
+    echo -e "\n\033[33mStopping n8n if running...\033[0m"
+    # Try to stop n8n using common methods
+    pkill -f "n8n" 2>/dev/null || true
+    
+    echo -e "\033[33mRemoving n8n data directory...\033[0m"
+    if [ -d "$N8N_DATA_DIR" ]; then
+      rm -rf "$N8N_DATA_DIR"
+    fi
+    
+    # Reinstall n8n dependencies
+    echo -e "\033[33mReinstalling n8n dependencies...\033[0m"
+    
+    # Check if we're in a valid n8n directory with a package.json
+    if [ -f "$N8N_DIR/package.json" ]; then
+      cd "$N8N_DIR"
+      
+      # Check if package-lock.json exists
+      if [ -f "package-lock.json" ]; then
+        echo "Found package-lock.json, using npm ci for clean install..."
+        npm ci || {
+          echo -e "\033[33mFailed with npm ci, trying npm install instead...\033[0m"
+          npm install
+        }
+      else
+        echo "No package-lock.json found, using npm install..."
+        npm install
+      fi
+      
+      # Verify installation
+      if [ $? -eq 0 ]; then
+        echo -e "\n\033[1;32m✅ n8n dependencies reinstalled successfully!\033[0m"
+      else
+        echo -e "\n\033[1;31m⚠️ Dependency installation had issues.\033[0m"
+        echo -e "\033[33mYou may need to manually run 'npm install' in the n8n directory.\033[0m"
+      fi
+    else
+      echo -e "\033[33mCouldn't find package.json in $N8N_DIR\033[0m"
+      echo -e "\033[33mYou may need to reinstall n8n manually with npm install -g n8n\033[0m"
+    fi
+    
+    echo -e "\n\033[1;32m✅ n8n reset successfully! You can now start fresh.\033[0m"
+  else
+    echo -e "\n\033[1;32mOperation canceled. Your n8n installation remains unchanged.\033[0m"
+  fi
+}
+
 # Set up trap to handle Ctrl+C in a more friendly way
 trap handle_interrupt INT
 
@@ -901,6 +1257,19 @@ else
       ;;
     --git-prep)
       git_prep
+      exit 0
+      ;;
+    --update-n8n)
+      check_n8n_version
+      update_n8n
+      exit 0
+      ;;
+    --cleanup)
+      run_n8n_cleanup
+      exit 0
+      ;;
+    --reset-installation)
+      reset_n8n_installation
       exit 0
       ;;
     --help)
