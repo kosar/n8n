@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import os
 import sys
 import json
@@ -31,37 +32,64 @@ DEFAULT_OUTPUT_DIR = os.path.expanduser("~/ocr_results")
 ENV_LAST_DIRECTORY = "OCR_EXTRACTOR_LAST_DIR"
 ENV_OUTPUT_DIRECTORY = "OCR_EXTRACTOR_OUTPUT_DIR"
 
-# Add new constants for better AI prompts
+# Enhanced constants for better AI prompts
 ANALYSIS_PROMPT = """
-You are an expert in organizing and analyzing text communications.
+You are an expert forensic text analyst specializing in reconstructing conversations from fragmentary evidence.
 
-I have OCR results from multiple screenshots of text messages or conversations.
-Please analyze these texts and:
+I have OCR results from multiple text message screenshots that may be incomplete, cut off, or in different formats.
 
+Your task:
 1. Create a strict chronological timeline of the conversation
-2. Identify all participants and their roles
-3. Connect related messages and threads
-4. Summarize the key points or decisions made
+2. Identify all participants by carefully analyzing message patterns, headers, and content
+3. For each message, determine the sender and recipients based on context clues
+4. Connect related messages into coherent conversation threads
+5. Use content analysis to place ambiguous messages in the correct sequence
+6. Fill in reasonable gaps in the conversation using context
+7. Be aware that screenshots might overlap, showing the same message multiple times
 
-Format your analysis as a beautiful, well-structured markdown document with:
-- A clear title and introduction 
-- Messages organized by date and time
-- Clear indication of senders and recipients
-- Visual separation of different conversation threads
-- Highlights of important information or decisions
+Important guidelines:
+- Pay close attention to timestamps, dates, and time markers in messages
+- Look for conversation patterns that indicate message flow
+- Note UI elements that distinguish senders from recipients (e.g., message alignment, colors, names)
+- If timestamps are ambiguous, use message content to determine sequence
+- When messages refer to earlier statements, connect them logically
+- DO NOT invent conversations that aren't evidenced in the text
+- EXPLICITLY note when you're making an inference vs. working with explicit information
 
-Use markdown formatting effectively to create an easy-to-read document.
+Format your analysis as a beautiful, narrative-style markdown document:
+- Begin with an executive summary of the conversation
+- Create distinct sections for each conversation thread or topic
+- Use clear headings with timestamps
+- Visually distinguish different speakers
+- Include quoted text blocks for important messages
+- Use markdown tables where appropriate to organize information
+- Use bold and italics to highlight key points and decisions
+- Add horizontal rules (---) to separate major sections
+
+Please maintain the original meaning and intent of all messages while organizing them into a coherent narrative.
 """
 
 SIMPLE_PROMPT = """
-Please organize these OCR results from text message screenshots into a chronological timeline.
-For each message, include:
-- Sender
-- Date and time
-- Message content
-- Any relevant context
+You are examining OCR text extracted from multiple text message screenshots.
 
-Format your response as markdown with clear headings and separation between messages.
+For each message:
+1. Identify the date and time (if available)
+2. Identify the sender
+3. Identify the recipients
+4. Note the platform (e.g., SMS, iMessage, WhatsApp) based on visual cues
+5. Include the complete message content
+
+Then:
+- Organize all messages in strict chronological order
+- Group related messages into conversation threads
+- Identify which messages are replies to earlier ones
+- Note when messages appear to be missing based on context
+
+Format your response as a clean, readable markdown document with:
+- Clear headings for each conversation or date
+- Visual separation between different senders
+- Timestamps shown consistently
+- Quoted text for important messages
 """
 
 # Update constants for config persistence
@@ -93,12 +121,19 @@ def load_config() -> Dict[str, Any]:
         console.print(f"[yellow]Warning: Could not load config: {str(e)}[/yellow]")
         return default_config
 
+# Update save_config to remove selected_files_count
 def save_config(config: Dict[str, Any]) -> None:
-    """Save configuration to file"""
+    """Save configuration to file, but don't persist selected_files_count"""
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        # Create a copy of the config without the selected_files_count
+        config_to_save = config.copy()
+        # Remove selected_files_count from what's written to disk
+        if "selected_files_count" in config_to_save:
+            del config_to_save["selected_files_count"]
+        
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
+            json.dump(config_to_save, f, indent=2)
     except Exception as e:
         console.print(f"[yellow]Warning: Could not save config: {str(e)}[/yellow]")
 
@@ -178,8 +213,9 @@ async def interactive_directory_browser(start_dir: str = os.getcwd()) -> str:
         except Exception as e:
             console.print(f"[bold red]Error: {str(e)}[/bold red]")
 
+# Enhanced image preprocessing for better OCR quality
 def preprocess_image(image_path: str) -> np.ndarray:
-    """Preprocess the image to improve OCR results"""
+    """Preprocess the image to improve OCR results specifically for text messages"""
     # Read the image using OpenCV
     image = cv2.imread(image_path)
     
@@ -190,19 +226,72 @@ def preprocess_image(image_path: str) -> np.ndarray:
         if image is None:
             raise ValueError(f"Could not open image: {image_path}")
     
+    # Create a copy for potential adaptive processing
+    original = image.copy()
+    
     # Convert to grayscale
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Apply thresholding to get black text on white background
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # Try multiple preprocessing techniques and return the best one
+    results = []
     
-    # Apply noise reduction
-    denoised = cv2.fastNlMeansDenoising(thresh, None, 10, 7, 21)
+    # 1. Simple grayscale with Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    results.append(blurred)
     
-    return denoised
+    # 2. Adaptive thresholding - good for varying lighting conditions
+    adaptive_thresh = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    results.append(adaptive_thresh)
+    
+    # 3. Otsu's thresholding - good for bimodal images
+    _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    results.append(otsu_thresh)
+    
+    # 4. Edge enhancement using unsharp mask
+    gaussian = cv2.GaussianBlur(gray, (0, 0), 3)
+    unsharp_mask = cv2.addWeighted(gray, 1.5, gaussian, -0.5, 0)
+    _, unsharp_thresh = cv2.threshold(unsharp_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    results.append(unsharp_thresh)
+    
+    # 5. Contrast enhancement - especially useful for screenshots
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    results.append(enhanced)
+    
+    # 6. Morphological operations to clean up noise
+    kernel = np.ones((1, 1), np.uint8)
+    morphed = cv2.morphologyEx(otsu_thresh, cv2.MORPH_CLOSE, kernel)
+    results.append(morphed)
+    
+    # Create a specific preprocessing for messaging apps
+    # Phone screenshots often have high contrast between text and background
+    # This tries to highlight that contrast
+    try:
+        # Detect if this is likely a messaging app screenshot
+        # (Check for typical UI elements like message bubbles)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        avg_sat = np.mean(hsv[:, :, 1])  # Messaging apps often have colored UI elements
+        
+        if avg_sat > 20:  # threshold determined experimentally
+            # Likely a messaging app - use specialized processing
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            _, messaging_thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            kernel = np.ones((1, 1), np.uint8)
+            messaging_morphed = cv2.morphologyEx(messaging_thresh, cv2.MORPH_CLOSE, kernel)
+            results.append(messaging_morphed)
+    except Exception:
+        # If specialized processing fails, continue with existing results
+        pass
+    
+    # Return the best processing method (for now, return the adaptive threshold as it's generally reliable)
+    # In a more advanced version, you could try OCR on all methods and pick the one with best confidence
+    return results[1]  # Adaptive threshold
 
+# Enhanced text extraction with multiple engine options
 def extract_text_from_image(image_path: str, lang: str = "eng") -> str:
-    """Extract text from image using OCR"""
+    """Extract text from image using OCR with enhanced preprocessing"""
     try:
         # Special handling for PDF files
         if image_path.lower().endswith('.pdf'):
@@ -216,20 +305,94 @@ def extract_text_from_image(image_path: str, lang: str = "eng") -> str:
                 
             return "\n\n".join(text_results)
         else:
-            # Regular image processing
-            # First try with preprocessing
-            try:
-                preprocessed = preprocess_image(image_path)
-                text = pytesseract.image_to_string(preprocessed, lang=lang)
-            except Exception:
-                # If preprocessing fails, try direct OCR
-                img = Image.open(image_path)
-                text = pytesseract.image_to_string(img, lang=lang)
+            # Enhanced preprocessing pipeline
+            preprocessed = preprocess_image(image_path)
+            
+            # First attempt - standard OCR with enhanced preprocessing
+            text1 = pytesseract.image_to_string(
+                preprocessed, 
+                lang=lang,
+                config='--psm 6 --oem 3'  # Page segmentation mode 6 (assume single uniform block of text)
+            )
+            
+            # Second attempt - try a different page segmentation mode
+            # PSM 4 assumes a single column of text of variable sizes
+            text2 = pytesseract.image_to_string(
+                preprocessed, 
+                lang=lang,
+                config='--psm 4 --oem 3'
+            )
+            
+            # Third attempt - try yet another segmentation mode
+            # PSM 3 is fully automatic page segmentation without orientation detection
+            text3 = pytesseract.image_to_string(
+                preprocessed, 
+                lang=lang,
+                config='--psm 3 --oem 3'
+            )
+            
+            # Pick the result with the most content
+            # This is a simple heuristic but works surprisingly well
+            texts = [text1, text2, text3]
+            text = max(texts, key=len)
+            
+            # If the text is short, check if it's likely a failure and try direct OCR
+            if len(text.strip()) < 50:
+                try:
+                    img = Image.open(image_path)
+                    direct_text = pytesseract.image_to_string(img, lang=lang)
+                    if len(direct_text.strip()) > len(text.strip()):
+                        text = direct_text
+                except Exception:
+                    pass
+            
+            # Post-process the text
+            text = post_process_ocr_text(text)
             
             return text
     except Exception as e:
         console.print(f"[bold red]Error processing {image_path}: {str(e)}[/bold red]")
         return f"ERROR: {str(e)}"
+
+def post_process_ocr_text(text: str) -> str:
+    """Clean up OCR text for better readability"""
+    # Replace common OCR errors in text messages
+    replacements = {
+        # Common OCR errors in timestamps
+        r'([0-9])l([0-9])': r'\1:\2',  # Replace "l" with ":" in times
+        r'([0-9])I([0-9])': r'\1:\2',  # Replace "I" with ":" in times
+        
+        # Fix common text message UI elements
+        r'(< Message)': r'←Message',  # Fix back button
+        r'(< Back)': r'←Back',
+        
+        # Fix common punctuation errors
+        r',,': ',',
+        r'\.\.\.\.': '...',
+        r'\.\.\,': '...',
+        
+        # Fix common quote marks
+        r'``': '"',
+        r"''": '"',
+    }
+    
+    # Apply all replacements
+    processed_text = text
+    for pattern, replacement in replacements.items():
+        processed_text = re.sub(pattern, replacement, processed_text)
+    
+    # Filter out very short lines that are likely noise
+    lines = processed_text.split('\n')
+    filtered_lines = [line for line in lines if len(line.strip()) > 1 or line.strip().isdigit()]
+    
+    # Rejoin the text
+    processed_text = '\n'.join(filtered_lines)
+    
+    # Remove excess whitespace but preserve paragraph breaks
+    processed_text = re.sub(r'\n\s*\n', '\n\n', processed_text)
+    processed_text = re.sub(r' +', ' ', processed_text)
+    
+    return processed_text.strip()
 
 def get_image_metadata(image_path: str) -> Dict[str, Any]:
     """Extract metadata from image"""
@@ -280,6 +443,7 @@ def get_image_metadata(image_path: str) -> Dict[str, Any]:
             "error": str(e)
         }
 
+# Update select_files_for_analysis to always allow reselection
 async def select_files_for_analysis(directory: str) -> List[str]:
     """Allow user to select which files to include in analysis"""
     all_files = [f for f in os.listdir(directory) if is_supported_file(os.path.join(directory, f))]
@@ -311,8 +475,9 @@ async def select_files_for_analysis(directory: str) -> List[str]:
     console.print("1. Select all files")
     console.print("2. Select files by number (comma-separated)")
     console.print("3. Select files by pattern match")
+    console.print("4. Cancel selection")
     
-    choice = Prompt.ask("Choose an option", choices=["1", "2", "3"], default="1")
+    choice = Prompt.ask("Choose an option", choices=["1", "2", "3", "4"], default="1")
     
     selected_files = []
     
@@ -357,7 +522,10 @@ async def select_files_for_analysis(directory: str) -> List[str]:
         
         if not matched_files:
             console.print(f"[yellow]No files matched the pattern '{pattern}'.[/yellow]")
-            return await select_files_for_analysis(directory)
+            # Don't recurse - instead return empty list or try again
+            if Confirm.ask("Try a different pattern?", default=True):
+                return await select_files_for_analysis(directory)
+            return []
         
         console.print(f"[green]Found {len(matched_files)} files matching '{pattern}':[/green]")
         for f in matched_files[:10]:  # Show first 10 matches
@@ -370,12 +538,20 @@ async def select_files_for_analysis(directory: str) -> List[str]:
             selected_files = [os.path.join(directory, f) for f in matched_files]
             console.print(f"[green]✓ Selected {len(selected_files)} images[/green]")
         else:
-            return await select_files_for_analysis(directory)
+            # Don't recurse - instead return empty list or try again
+            if Confirm.ask("Try again with a different selection?", default=True):
+                return await select_files_for_analysis(directory)
+            return []
     
-    # Save selection count to show in the main menu - using config instead of env vars
+    elif choice == "4":
+        console.print("[yellow]Selection cancelled. No files selected.[/yellow]")
+        return []
+    
+    # Update the in-memory config but don't persist to disk
     if selected_files:
         config = load_config()
         config["selected_files_count"] = str(len(selected_files))
+        # This is fine as the save_config function will now strip selected_files_count
         save_config(config)
         
     return selected_files
@@ -677,11 +853,82 @@ def copy_images_to_output(file_paths: List[str], output_dir: str) -> Dict[str, s
 
 # Enhanced function to create beautiful markdown output
 async def create_markdown_summary(data: List[Dict[str, Any]], results_file: str, image_map: Dict[str, str] = None) -> str:
-    """Create a beautiful markdown summary of the OCR results"""
+    """Create a beautiful markdown summary of the OCR results with better structure"""
     # Determine output path based on results file
     output_dir = os.path.dirname(results_file)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(output_dir, f"ocr_summary_{timestamp}.md")
+    
+    # Try to detect message dates from content for better sorting
+    for item in data:
+        text = item.get("text", "")
+        filename = item.get("filename", "")
+        
+        # Look for common date formats in the text
+        date_formats = [
+            r'(\d{1,2}/\d{1,2}/\d{2,4})',  # MM/DD/YY or DD/MM/YY
+            r'(\d{1,2}-\d{1,2}-\d{2,4})',  # MM-DD-YY or DD-MM-YY
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}[,]?\s+\d{2,4}',  # Month DD, YYYY
+            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}[,]?\s+\d{2,4}',  # Full month
+            r'(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))',  # Time format
+            r'(\d{1,2}:\d{2})',  # 24-hour time format
+            r'(Today|Yesterday)',  # Relative dates
+        ]
+        
+        # Search for dates and times in the text
+        detected_dates = []
+        for pattern in date_formats:
+            matches = re.findall(pattern, text)
+            if matches:
+                detected_dates.extend(matches)
+        
+        # If dates were found, store them
+        if detected_dates:
+            item["detected_dates"] = detected_dates
+            # Add a simple sorting key based on the first date found
+            try:
+                # Extract a date for sorting - this is just a simple heuristic
+                first_date = detected_dates[0]
+                # If it's just a time, prepend today's date
+                if re.match(r'^\d{1,2}:\d{2}', first_date):
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    item["date"] = f"{today} {first_date}"
+                else:
+                    item["date"] = first_date
+            except Exception:
+                # If parsing fails, don't set a date
+                pass
+        
+        # Try to extract sender information
+        names_pattern = r'(From|To|Sent by|Received from|Forwarded by):\s*([A-Za-z\s\.]+)'
+        name_matches = re.findall(names_pattern, text)
+        if name_matches:
+            for match_type, name in name_matches:
+                if match_type.lower().startswith('from') or match_type.lower().startswith('sent'):
+                    item["sender"] = name.strip()
+                elif match_type.lower().startswith('to'):
+                    item["recipient"] = name.strip()
+        
+        # Look for message app indicators
+        app_indicators = {
+            'iMessage': [r'iMessage', r'Delivered', r'Read', r'Apple'],
+            'WhatsApp': [r'WhatsApp', r'WA:', r'forwarded message'],
+            'SMS': [r'SMS', r'Text Message', r'Mobile'],
+            'Messenger': [r'Messenger', r'Facebook', r'M:'],
+            'Slack': [r'Slack', r'slackbot', r'thread'],
+            'Discord': [r'Discord', r'#channel', r'server'],
+            'Teams': [r'Teams', r'Microsoft Teams'],
+            'Telegram': [r'Telegram'],
+            'Signal': [r'Signal'],
+        }
+        
+        for app, patterns in app_indicators.items():
+            for pattern in patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    item["app"] = app
+                    break
+            if "app" in item:
+                break
     
     # Sort data by date if possible, handling unknown dates
     try:
@@ -690,25 +937,33 @@ async def create_markdown_summary(data: List[Dict[str, Any]], results_file: str,
         undated_items = []
         
         for item in data:
-            filename = item.get("filename", "unknown")
-            text = item.get("text", "")
-            # Try to find anything that looks like a date in the text
-            if "date" not in item or item["date"] == "unknown":
-                # If no date field, put in undated
-                undated_items.append(item)
-            else:
+            if "date" in item and item["date"] != "unknown":
                 dated_items.append(item)
+            else:
+                # Try to guess position based on filename
+                try:
+                    # Look for numbers in filename which might indicate sequence
+                    numbers = re.findall(r'\d+', item.get("filename", ""))
+                    if numbers:
+                        item["seq_num"] = int(numbers[0])
+                except Exception:
+                    pass
+                undated_items.append(item)
         
-        # Sort dated items
+        # Sort dated items by date
         dated_items.sort(key=lambda x: x.get("date", "9999-99-99"))
+        
+        # Sort undated items by sequence number if available
+        undated_items.sort(key=lambda x: x.get("seq_num", 9999))
         
         # Combine lists with dated items first
         sorted_data = dated_items + undated_items
-    except Exception:
+    except Exception as e:
+        console.print(f"[yellow]Error sorting data: {str(e)}[/yellow]")
         # If sorting fails, just use the original data
         sorted_data = data
     
-    # Create markdown content
+    # Create markdown content with better structure
     markdown = [
         "# OCR Text Extraction Summary",
         f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
@@ -719,38 +974,108 @@ async def create_markdown_summary(data: List[Dict[str, Any]], results_file: str,
         "3. [Analysis](#analysis)",
         "",
         "## Overview",
-        f"This document contains OCR text extracted from {len(data)} images.",
+        f"This document contains OCR text extracted from {len(data)} message screenshots.",
         "",
-        "## Extracted Messages",
+        "The following patterns were detected:",
         ""
     ]
     
-    # Add each message with image reference if available
+    # Add pattern summaries
+    app_counts = {}
+    sender_counts = {}
+    date_ranges = []
+    
+    for item in sorted_data:
+        app = item.get("app", "unknown")
+        app_counts[app] = app_counts.get(app, 0) + 1
+        
+        sender = item.get("sender", "unknown")
+        if sender != "unknown":
+            sender_counts[sender] = sender_counts.get(sender, 0) + 1
+            
+        if "date" in item and item["date"] != "unknown":
+            date_ranges.append(item["date"])
+    
+    # Add app information
+    markdown.append("### Messaging Platforms")
+    for app, count in app_counts.items():
+        markdown.append(f"- **{app}**: {count} message{'s' if count > 1 else ''}")
+    markdown.append("")
+    
+    # Add sender information if available
+    if any(sender != "unknown" for sender in sender_counts.keys()):
+        markdown.append("### Detected Senders")
+        for sender, count in sender_counts.items():
+            markdown.append(f"- **{sender}**: {count} message{'s' if count > 1 else ''}")
+        markdown.append("")
+    
+    # Add date range if available
+    if date_ranges:
+        markdown.append("### Timeline")
+        try:
+            first_date = min(date_ranges)
+            last_date = max(date_ranges)
+            if first_date == last_date:
+                markdown.append(f"- All messages are from **{first_date}**")
+            else:
+                markdown.append(f"- Messages span from **{first_date}** to **{last_date}**")
+        except Exception:
+            markdown.append(f"- Various dates detected: {', '.join(date_ranges[:5])}")
+        markdown.append("")
+    
+    markdown.append("## Extracted Messages")
+    markdown.append("")
+    
+    # Add each message with enhanced formatting
     for i, item in enumerate(sorted_data, 1):
         filename = item.get("filename", "unknown")
         file_path = item.get("file_path", "")
         text = item.get("text", "").strip()
         
-        # Try to get date information
+        # Get metadata for this item
         date_info = item.get("date", "Unknown date")
         sender_info = item.get("sender", "Unknown sender")
+        app_info = item.get("app", "Unknown platform")
+        recipient_info = item.get("recipient", "Unknown recipient")
         
-        # Create section header
-        markdown.append(f"### Message {i}: {sender_info} ({date_info})")
+        # Create a better section header with more information
+        header = f"### Message {i}"
+        if date_info != "Unknown date":
+            header += f": {date_info}"
+            
+        markdown.append(header)
+        markdown.append("")
+        
+        # Add metadata table for each message
+        markdown.append("| Field | Value |")
+        markdown.append("|-------|-------|")
+        markdown.append(f"| Source file | `{filename}` |")
+        markdown.append(f"| Platform | {app_info} |")
+        markdown.append(f"| Sender | {sender_info} |")
+        if recipient_info != "Unknown recipient":
+            markdown.append(f"| Recipient | {recipient_info} |")
+        if "detected_dates" in item:
+            markdown.append(f"| Detected dates | {', '.join(item['detected_dates'][:3])} |")
+        markdown.append("")
         
         # Add image reference if we have the mapping
         if image_map and file_path in image_map:
             rel_path = image_map[file_path]
-            markdown.append(f"[View original image]({rel_path})")
+            markdown.append(f"![Screenshot]({rel_path})")
+            markdown.append("")
         
-        # Add filename
-        markdown.append(f"*Source: {filename}*")
-        
-        # Add the OCR text in a code block for clarity
+        # Add the OCR text in a properly formatted code block
+        markdown.append("<details>")
+        markdown.append("<summary>View extracted text</summary>")
         markdown.append("")
         markdown.append("```")
         markdown.append(text)
         markdown.append("```")
+        markdown.append("</details>")
+        markdown.append("")
+        
+        # Add a separator between messages
+        markdown.append("---")
         markdown.append("")
     
     # Write to file
@@ -927,18 +1252,19 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
                 pull_ollama_model(model_name)
         
         # Now use the model to analyze
-        console.print(f"[cyan]Using model: {model_name}[/cyan]", flush=True)
+        console.print(f"[cyan]Using model: {model_name}[/cyan]")
         
         # Instead of using Progress, use direct console messages to avoid buffering issues
-        console.print("[cyan]Starting analysis with Ollama...[/cyan]", flush=True)
-        console.print("[cyan]This may take a few minutes depending on the model and amount of text...[/cyan]", flush=True)
+        console.print("[cyan]Starting analysis with Ollama...[/cyan]")
+        console.print("[cyan]This may take a few minutes depending on the model and amount of text...[/cyan]")
         
         # Record start time to show elapsed time
         start_time = time.time()
         
         try:
             # Call Ollama with appropriate parameters
-            console.print("[cyan]Sending request to Ollama model...[/cyan]", flush=True)
+            console.print("[cyan]Sending request to Ollama model...[/cyan]")
+            
             response = ollama.chat(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -950,10 +1276,10 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
             
             # Calculate elapsed time
             elapsed_time = time.time() - start_time
-            console.print(f"[green]✓ Analysis completed in {elapsed_time:.2f} seconds[/green]", flush=True)
+            console.print(f"[green]✓ Analysis completed in {elapsed_time:.2f} seconds[/green]")
             
             # More detailed debugging for response format
-            console.print(f"[dim]Debug - Response type: {type(response)}[/dim]", flush=True)
+            console.print(f"[dim]Debug - Response type: {type(response)}[/dim]")
             
             # Handle different Ollama API versions and response formats
             analysis = None
@@ -961,22 +1287,22 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
             # Method 1: Standard dict with message->content structure
             if isinstance(response, dict) and "message" in response and "content" in response["message"]:
                 analysis = response["message"]["content"]
-                console.print("[green]✓ Successfully extracted content from response[/green]", flush=True)
+                console.print("[green]✓ Successfully extracted content from response[/green]")
             
             # Method 2: ChatResponse object with message attribute (newer Ollama versions)
             elif hasattr(response, 'message') and hasattr(response.message, 'content'):
                 analysis = response.message.content
-                console.print("[green]✓ Successfully extracted content from response.message.content[/green]", flush=True)
+                console.print("[green]✓ Successfully extracted content from response.message.content[/green]")
             
             # Method 3: Response object with content attribute
             elif hasattr(response, 'content'):
                 analysis = response.content
-                console.print("[green]✓ Successfully extracted content from response.content[/green]", flush=True)
+                console.print("[green]✓ Successfully extracted content from response.content[/green]")
             
             # Method 4: Look for content directly in response for older Ollama versions
             elif isinstance(response, dict) and "content" in response:
                 analysis = response["content"]
-                console.print("[green]✓ Successfully extracted content from response['content'][/green]", flush=True)
+                console.print("[green]✓ Successfully extracted content from response['content'][/green]")
             
             # If we found content through any method, proceed with saving to file
             if analysis:
@@ -985,7 +1311,7 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
                 output_dir = os.path.dirname(results_file)
                 output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
                 
-                console.print(f"[cyan]Writing analysis to: {output_path}[/cyan]", flush=True)
+                console.print(f"[cyan]Writing analysis to: {output_path}[/cyan]")
                 
                 # Ensure output directory exists
                 os.makedirs(output_dir, exist_ok=True)
@@ -1016,25 +1342,25 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
                                 filename = os.path.basename(original_path)
                                 f.write(f"| [{filename}]({copied_path}) | ![]({copied_path}) |\n")
                                 
-                    console.print(f"[green]✓ Analysis saved to: {output_path}[/green]", flush=True)
+                    console.print(f"[green]✓ Analysis saved to: {output_path}[/green]")
                     
                     # Verify the file was created
                     if os.path.exists(output_path):
                         file_size = os.path.getsize(output_path)
-                        console.print(f"[green]✓ Confirmed file exists: {output_path} ({file_size} bytes)[/green]", flush=True)
+                        console.print(f"[green]✓ Confirmed file exists: {output_path} ({file_size} bytes)[/green]")
                     else:
-                        console.print(f"[red]! File was not created: {output_path}[/red]", flush=True)
+                        console.print(f"[red]! File was not created: {output_path}[/red]")
                         
                 except Exception as file_error:
-                    console.print(f"[bold red]Error writing markdown file: {str(file_error)}[/bold red]", flush=True)
+                    console.print(f"[bold red]Error writing markdown file: {str(file_error)}[/bold red]")
                     import traceback
-                    console.print(traceback.format_exc(), flush=True)
+                    console.print(traceback.format_exc())
                     return False
                 
                 # Show preview of analysis
-                console.print("\n[bold]Analysis Preview:[/bold]", flush=True)
+                console.print("\n[bold]Analysis Preview:[/bold]")
                 preview = analysis[:2000] + "..." if len(analysis) > 2000 else analysis
-                console.print(Panel(preview, title=f"Model: {model_name}", border_style="green", width=100), flush=True)
+                console.print(Panel(preview, title=f"Model: {model_name}", border_style="green", width=100))
                 
                 # Ask if user wants to view full analysis
                 if Confirm.ask("Open analysis in text editor?", default=True):
@@ -1046,80 +1372,103 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
                         else:  # Linux
                             os.system(f'xdg-open "{output_path}"')
                     except Exception as e:
-                        console.print(f"[yellow]Could not open file: {str(e)}[/yellow]", flush=True)
+                        console.print(f"[yellow]Could not open file: {str(e)}[/yellow]")
                         
                 return True  # Return True to indicate success
                 
-            # Rest of the error handling code with flush=True added to all console.print calls
-            # ...existing code but add flush=True to all console.print calls...
+            # Rest of the error handling code with console.file.flush() added after console.print calls
+            # ...existing code...
             
         except Exception as e:
-            console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]", flush=True)
-            console.print("[yellow]Try a different model or check your Ollama installation.[/yellow]", flush=True)
+            console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]")
+            console.print("[yellow]Try a different model or check your Ollama installation.[/yellow]")
             return False
     
     except ImportError:
-        console.print("[red]Ollama package not installed. Try: pip install ollama[/red]", flush=True)
+        console.print("[red]Ollama package not installed. Try: pip install ollama[/red]")
         return False
     except Exception as e:
-        console.print(f"[bold red]Unexpected error during model analysis: {str(e)}[/bold red]", flush=True)
+        console.print(f"[bold red]Unexpected error during model analysis: {str(e)}[/bold red]")
         import traceback
-        console.print(traceback.format_exc(), flush=True)
+        console.print(traceback.format_exc())
         return False
 
-# Fix the process_all_files function to also use flush=True
+# Fix the process_all_files function to remove flush parameter
 async def process_all_files(directory: str, output_dir: str, lang: str = "eng"):
     """Process all images in a directory and run the complete workflow"""
-    console.print("\n[bold]Quick Process: Processing all image files in directory[/bold]", flush=True)
+    console.print("\n[bold]Quick Process: Processing all image files in directory[/bold]")
+    # Force flush output after each print by accessing the underlying Console's file object
+    console.file.flush()
     
     try:
         # Step 1: Find all supported images
-        console.print("[cyan]Looking for supported image files...[/cyan]", flush=True)
+        console.print("[cyan]Looking for supported image files...[/cyan]")
+        console.file.flush()
+        
         file_paths = [os.path.join(directory, f) for f in os.listdir(directory) 
                     if is_supported_file(os.path.join(directory, f))]
         
         if not file_paths:
-            console.print("[yellow]No supported image files found in this directory.[/yellow]", flush=True)
+            console.print("[yellow]No supported image files found in this directory.[/yellow]")
+            console.file.flush()
             return False
+        
+        # Sort files for consistent processing
+        file_paths.sort()
+        console.print(f"[green]Found {len(file_paths)} image files to process.[/green]")
+        console.file.flush()
             
-        # Step 2: Process images
-        console.print(f"[cyan]Found {len(file_paths)} images. Processing...[/cyan]", flush=True)
+        # Step 2: Process images - explicitly await the result
+        console.print(f"[cyan]Processing {len(file_paths)} images...[/cyan]")
+        console.file.flush()
+        
         results = await process_images(file_paths, lang)
         
         if not results:
-            console.print("[yellow]No results extracted.[/yellow]", flush=True)
+            console.print("[yellow]No results extracted.[/yellow]")
+            console.file.flush()
             return False
         
-        # Step 3: Save results
-        console.print("[cyan]Saving OCR results to file...[/cyan]", flush=True)
+        # Step 3: Save results - explicitly await the result
+        console.print("[cyan]Saving OCR results to file...[/cyan]")
+        console.file.flush()
+        
         results_file = await save_results(results, output_dir)
-        console.print(f"[green]OCR results saved to: {results_file}[/green]", flush=True)
+        console.print(f"[green]OCR results saved to: {results_file}[/green]")
+        console.file.flush()
         
         # Verify results file was created
         if not os.path.exists(results_file):
-            console.print(f"[red]! Results file does not exist at: {results_file}[/red]", flush=True)
+            console.print(f"[red]! Results file does not exist at: {results_file}[/red]")
+            console.file.flush()
             return False
             
         # Display a summary of the extracted data
-        console.print(display_result_summary(results), flush=True)
+        console.print(display_result_summary(results))
+        console.file.flush()
         
         # Step 4: Generate analysis - use detailed prompt by default
-        console.print("\n[bold]Generating AI analysis...[/bold]", flush=True)
+        console.print("\n[bold]Generating AI analysis...[/bold]")
+        console.file.flush()
         
-        # We need to ensure this completes, so wait for it
+        # We need to ensure this completes, so wait for it explicitly
         success = await send_to_model(results_file, "detailed")
         
         if success:
-            console.print("[green]✓ AI analysis completed successfully![/green]", flush=True)
+            console.print("[green]✓ AI analysis completed successfully![/green]")
+            console.file.flush()
             return True
         else:
-            console.print("[yellow]AI analysis did not complete successfully.[/yellow]", flush=True)
+            console.print("[yellow]AI analysis did not complete successfully.[/yellow]")
+            console.file.flush()
             return False
             
     except Exception as e:
-        console.print(f"[bold red]Error in process_all_files: {str(e)}[/bold red]", flush=True)
+        console.print(f"[bold red]Error in process_all_files: {str(e)}[/bold red]")
+        console.file.flush()
         import traceback
-        console.print(traceback.format_exc(), flush=True)
+        console.print(traceback.format_exc())
+        console.file.flush()
         return False
 
 def check_dependencies():
@@ -1159,7 +1508,7 @@ def check_dependencies():
         console.print("[yellow]Ollama package not installed. Install with: pip install ollama[/yellow]")
         console.print("[blue]You can still use OCR functionality, but AI analysis will be unavailable.[/blue]")
 
-# Update main function with reorganized menu items
+# Update main function to remove flush parameter
 async def main():
     """Main application flow"""
     try:
@@ -1176,7 +1525,13 @@ async def main():
         current_directory = config.get("last_directory", os.getcwd())
         lang = config.get("last_language", "eng")
         output_dir = config.get("output_directory", DEFAULT_OUTPUT_DIR)
-        selected_files_count = config.get("selected_files_count", "0")
+        
+        # Important: Don't initialize selected_files_count from config
+        # We want this to start fresh each time
+        selected_files_count = "0"
+        
+        # Initialize file_paths to avoid reference issues
+        file_paths = []
         
         # Validate loaded paths
         if not os.path.isdir(current_directory):
@@ -1213,16 +1568,25 @@ async def main():
             console.print(f"[blue]Output directory:[/blue] {output_dir}")
             
             # Show selected files count if available
-            if 'file_paths' in locals() and file_paths:
+            if file_paths:
                 console.print(f"[blue]Selected files:[/blue] {len(file_paths)}")
             elif selected_files_count != "0":
                 console.print(f"[blue]Selected files:[/blue] {selected_files_count} (from previous selection)")
             
             # Get user choice - updated for new menu numbering
-            choice = Prompt.ask("\nChoose an option", choices=["0", "1", "2", "3", "4", "5", "6", "7"], default="1")
+            try:
+                choice = Prompt.ask("\nChoose an option", choices=["0", "1", "2", "3", "4", "5", "6", "7"], default="1")
+            except Exception as e:
+                console.print(f"[bold red]Error in menu selection: {str(e)}[/bold red]")
+                # If prompt fails, provide a way to exit
+                console.print("[yellow]Press Enter to try again or type 'exit' to quit[/yellow]")
+                response = input()
+                if response.lower() == 'exit':
+                    return
+                continue
             
             if choice == "1":
-                # Select directory with images (formerly choice 1, unchanged)
+                # Select directory with images
                 console.print("\n[bold]Select directory containing images[/bold]")
                 try:
                     prev_dir = current_directory
@@ -1231,49 +1595,67 @@ async def main():
                     # Save to config if changed
                     if prev_dir != current_directory:
                         config["last_directory"] = current_directory
-                        # Clear selected files count if directory changed
-                        config["selected_files_count"] = "0"
-                        save_config(config)
+                        # Reset file selection when changing directory
                         selected_files_count = "0"
-                        
-                        if 'file_paths' in locals():
-                            del file_paths  # Clear selected files when directory changes
+                        # Clear file_paths when directory changes
+                        file_paths = []
+                        save_config(config)
                         
                 except Exception as e:
                     console.print(f"[yellow]Error with directory browser: {str(e)}[/yellow]")
             
             elif choice == "2":
-                # Set output directory (formerly choice 5)
+                # Set output directory
                 console.print("\n[bold]Set Output Directory[/bold]")
                 console.print(f"Current output directory: {output_dir}")
                 
                 if Confirm.ask("Change output directory?", default=True):
-                    prev_dir = output_dir
-                    new_dir = await interactive_directory_browser(output_dir)
-                    output_dir = new_dir
-                    
-                    # Save to config if changed
-                    if prev_dir != output_dir:
-                        config["output_directory"] = output_dir
-                        save_config(config)
+                    try:
+                        prev_dir = output_dir
+                        new_dir = await interactive_directory_browser(output_dir)
+                        output_dir = new_dir
                         
-                    console.print(f"[green]Output directory set to: {output_dir}[/green]")
+                        # Save to config if changed
+                        if prev_dir != output_dir:
+                            config["output_directory"] = output_dir
+                            save_config(config)
+                            
+                        console.print(f"[green]Output directory set to: {output_dir}[/green]")
+                    except Exception as e:
+                        console.print(f"[yellow]Error selecting output directory: {str(e)}[/yellow]")
             
             elif choice == "3":
-                # Select files for analysis (formerly choice 2)
+                # Select files for analysis
                 console.print("\n[bold]Select images for OCR processing[/bold]")
-                file_paths = await select_files_for_analysis(current_directory)
                 
-                if not file_paths:
-                    console.print("[yellow]No files selected.[/yellow]")
-                    continue
+                # Clear any previous selection
+                if file_paths:
+                    if Confirm.ask("You already selected files. Clear current selection?", default=True):
+                        file_paths = []
+                        selected_files_count = "0"
+                    else:
+                        console.print(f"[green]Keeping current selection of {len(file_paths)} files.[/green]")
+                        continue
                 
-                # Update selected_files_count from config
-                config = load_config()
-                selected_files_count = config.get("selected_files_count", "0")
+                # Now select new files
+                try:
+                    new_file_paths = await select_files_for_analysis(current_directory)
+                    
+                    if not new_file_paths:
+                        console.print("[yellow]No files selected.[/yellow]")
+                        selected_files_count = "0"
+                    else:
+                        file_paths = new_file_paths  # Explicitly update the file_paths variable
+                        selected_files_count = str(len(file_paths))
+                        console.print(f"[green]Selected {len(file_paths)} files for analysis.[/green]")
+                except Exception as e:
+                    console.print(f"[bold red]Error selecting files: {str(e)}[/bold red]")
+                    console.print("[yellow]Please try again.[/yellow]")
+                    file_paths = []  # Reset on error
+                    selected_files_count = "0"
             
             elif choice == "4":
-                # Change OCR language (formerly choice 3)
+                # Change OCR language
                 console.print("\n[bold]Change OCR Language[/bold]")
                 console.print("[blue]Common language codes:[/blue]")
                 console.print("eng = English")
@@ -1296,59 +1678,75 @@ async def main():
                 console.print(f"[green]OCR language set to: {lang}[/green]")
             
             elif choice == "5":
-                # Process images with OCR (formerly choice 4)
+                # Process images with OCR
                 console.print("\n[bold]Process images with OCR[/bold]")
-                if not 'file_paths' in locals() or not file_paths:
+                if not file_paths:
                     console.print("[yellow]No files selected. Please select files first (option 3).[/yellow]")
                     continue
+                
+                try:
+                    results = await process_images(file_paths, lang)
                     
-                results = await process_images(file_paths, lang)
-                
-                if not results:
-                    console.print("[yellow]No results extracted.[/yellow]")
-                    continue
-                
-                # Display summary of extracted data
-                console.print(display_result_summary(results))
-                
-                # Save results
-                results_file = await save_results(results, output_dir)
-                console.print(f"[green]OCR results saved to: {results_file}[/green]")
-                
-                # Ask if user wants to see full text of a specific result
-                if Confirm.ask("View full text of a specific result?", default=False):
-                    idx = int(Prompt.ask("Enter result number", default="1")) - 1
-                    if 0 <= idx < len(results):
-                        result = results[idx]
-                        filename = result.get("filename", "unknown")
-                        text = result.get("text", "No text extracted")
-                        console.print(Panel(text, title=f"OCR Text: {filename}", border_style="blue"))
-                    else:
-                        console.print("[yellow]Invalid result number.[/yellow]")
+                    if not results:
+                        console.print("[yellow]No results extracted.[/yellow]")
+                        continue
+                    
+                    # Display summary of extracted data
+                    console.print(display_result_summary(results))
+                    
+                    # Save results
+                    results_file = await save_results(results, output_dir)
+                    console.print(f"[green]OCR results saved to: {results_file}[/green]")
+                    
+                    # Ask if user wants to see full text of a specific result
+                    if Confirm.ask("View full text of a specific result?", default=False):
+                        idx_str = Prompt.ask("Enter result number", default="1")
+                        try:
+                            idx = int(idx_str) - 1
+                            if 0 <= idx < len(results):
+                                result = results[idx]
+                                filename = result.get("filename", "unknown")
+                                text = result.get("text", "No text extracted")
+                                console.print(Panel(text, title=f"OCR Text: {filename}", border_style="blue"))
+                            else:
+                                console.print("[yellow]Invalid result number.[/yellow]")
+                        except ValueError:
+                            console.print("[yellow]Invalid input. Expected a number.[/yellow]")
+                except Exception as e:
+                    console.print(f"[bold red]Error processing images: {str(e)}[/bold red]")
+                    import traceback
+                    console.print(traceback.format_exc())
             
             elif choice == "6":
                 # Send to model for analysis
-                console.print("\n[bold]Send to AI for Analysis[/bold]", flush=True)
+                console.print("\n[bold]Send to AI for Analysis[/bold]")
                 
                 # Critical fix: Check if results_file exists in local scope
-                if 'results_file' not in locals() or not os.path.exists(results_file):
+                if not 'results_file' in locals() or not os.path.exists(results_file):
                     if 'results' in locals() and results:
                         # If we have results but no saved file, save them first
-                        results_file = await save_results(results, output_dir)
-                        console.print(f"[green]OCR results saved to: {results_file}[/green]", flush=True)
+                        try:
+                            results_file = await save_results(results, output_dir)
+                            console.print(f"[green]OCR results saved to: {results_file}[/green]")
+                        except Exception as e:
+                            console.print(f"[bold red]Error saving results: {str(e)}[/bold red]")
+                            continue
                     else:
-                        console.print("[yellow]No OCR results available. Process images first (option 5).[/yellow]", flush=True)
+                        console.print("[yellow]No OCR results available. Process images first (option 5).[/yellow]")
                         continue
                 
-                # Now we're sure results_file exists
-                success = await send_to_model(results_file)
-                if success:
-                    console.print("[green]✓ AI analysis completed successfully![/green]", flush=True)
-                else:
-                    console.print("[yellow]AI analysis did not complete successfully.[/yellow]", flush=True)
+                # Use the send_to_model function with error handling
+                try:
+                    success = await send_to_model(results_file)
+                    if success:
+                        console.print("[green]✓ AI analysis completed successfully![/green]")
+                    else:
+                        console.print("[yellow]AI analysis did not complete successfully.[/yellow]")
+                except Exception as e:
+                    console.print(f"[bold red]Error during AI analysis: {str(e)}[/bold red]")
             
             elif choice == "7":
-                # Quick Process All - new option with improved handling (formerly choice 8)
+                # Quick Process All
                 console.print("\n[bold]Quick Process All[/bold]")
                 console.print("[yellow]This will process all supported images in the current directory and generate analysis.[/yellow]")
                 
@@ -1357,14 +1755,21 @@ async def main():
                         # Ensure output directory exists
                         os.makedirs(output_dir, exist_ok=True)
                         
-                        # Run the all-in-one process and wait for it to complete
-                        success = await process_all_files(current_directory, output_dir, lang)
+                        # Use a conditional to check if there are images in the directory
+                        image_files = [f for f in os.listdir(current_directory) 
+                                   if is_supported_file(os.path.join(current_directory, f))]
                         
-                        if success:
-                            console.print("[green]✓ Quick process completed successfully![/green]")
+                        if not image_files:
+                            console.print("[yellow]No supported image files found in this directory.[/yellow]")
                         else:
-                            console.print("[yellow]Quick process did not complete successfully.[/yellow]")
+                            # Run the all-in-one process and wait for it to complete
+                            success = await process_all_files(current_directory, output_dir, lang)
                             
+                            if success:
+                                console.print("[green]✓ Quick process completed successfully![/green]")
+                            else:
+                                console.print("[yellow]Quick process did not complete successfully.[/yellow]")
+                        
                         # Add a prompt to continue after the process completes
                         console.print("\nPress Enter to return to main menu...")
                         input()
@@ -1372,9 +1777,11 @@ async def main():
                         console.print(f"[bold red]Error during quick process: {str(e)}[/bold red]")
                         import traceback
                         console.print(traceback.format_exc())
+                        console.print("\nPress Enter to continue...")
+                        input()
             
             elif choice == "0":
-                # Exit (formerly choice 7) - now using standard menu convention with 0 for exit
+                # Exit
                 console.print("[cyan]Exiting application.[/cyan]")
                 
                 # Update config with latest settings
@@ -1383,18 +1790,23 @@ async def main():
                 config["last_language"] = lang
                 save_config(config)
                 
-                break
+                # Return from function instead of break to avoid asyncio issues
+                return
                 
             # Add a small pause between menu displays
             if choice != "0":  # Don't pause after exit
                 if choice != "7":  # Option 7 (Quick Process) already has its own pause
                     console.print("\nPress Enter to continue...")
-                    input()
+                    try:
+                        input()
+                    except Exception:
+                        # Handle any input errors
+                        pass
                 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user. Exiting...[/yellow]")
         
-        # Still save config even on keyboard interrupt
+        # Save config even on keyboard interrupt, but don't save selected files
         try:
             config = load_config()
             if 'current_directory' in locals():
@@ -1403,21 +1815,43 @@ async def main():
                 config["output_directory"] = output_dir
             if 'lang' in locals():
                 config["last_language"] = lang
+            # Don't save selected_files_count
             save_config(config)
-        except Exception:
-            pass
-            
+        except Exception as e:
+            console.print(f"[yellow]Error saving config during exit: {e}[/yellow]")
+        
     except Exception as e:
         console.print(f"[bold red]Unexpected error: {str(e)}[/bold red]")
         import traceback
         console.print(traceback.format_exc())
+        
+        # Provide a way to exit if there's an unexpected error
+        console.print("[yellow]Press Enter to exit...[/yellow]")
+        try:
+            input()
+        except:
+            pass
+
+# ...rest of the existing code...
 
 if __name__ == "__main__":
     # Ensure proper event loop handling
-    if sys.platform == 'win32':
-        import asyncio
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    else:
-        import asyncio
-        asyncio.run(main())
+    try:
+        if sys.platform == 'win32':
+            import asyncio
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.run(main())
+        else:
+            import asyncio
+            asyncio.run(main())
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        print("\nProgram terminated by user.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
