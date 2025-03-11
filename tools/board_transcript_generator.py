@@ -41,6 +41,13 @@ except ImportError:
 # Constants
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.JPG', '.PNG', '.JPEG', '.screenshot'}
 DEFAULT_MODEL = 'llama3.2-vision'
+DEFAULT_VISION_MODELS = [
+    'llama3.2-vision',
+    'llava:7b',
+    'llava',
+    'bakllava',
+    'moondream'
+]
 DEFAULT_DEEPSEEK_MODEL = 'deepseek-vision'
 DEFAULT_DEEPSEEK_API_URL = 'https://api.deepseek.com'
 DEFAULT_PROVIDER = 'ollama'  # 'ollama' or 'deepseek'
@@ -624,6 +631,86 @@ def display_data_summary(data: List[Dict[str, Any]]) -> Table:
     
     return table
 
+def get_available_ollama_models(filter_vision=True) -> List[str]:
+    """Get a list of available Ollama models, optionally filtering for vision models"""
+    available_models = []
+    try:
+        models_response = ollama.list()
+        
+        if 'models' not in models_response:
+            console.print("[yellow]Warning: Unexpected response format from Ollama API[/yellow]")
+            return available_models
+        
+        for model in models_response['models']:
+            model_name = model.get('name', '')
+            if not model_name and 'model' in model:
+                model_name = model['model']
+            
+            if not model_name:
+                continue
+                
+            # Add model to list if it's not filtered or if it's a likely vision model
+            if not filter_vision or any(vision_model in model_name.lower() for vision_model in ['vision', 'llava', 'bakllava', 'moondream']):
+                available_models.append(model_name)
+                
+        return available_models
+    except Exception as e:
+        console.print(f"[yellow]Error listing Ollama models: {e}[/yellow]")
+        return available_models
+
+async def select_ollama_model() -> str:
+    """Interactive selection of an Ollama model"""
+    console.print("[bold]Select Ollama Vision Model:[/bold]")
+    
+    # Get available models
+    all_models = get_available_ollama_models()
+    suggested_models = [m for m in DEFAULT_VISION_MODELS if m in all_models]
+    other_models = [m for m in all_models if m not in suggested_models]
+    
+    if not all_models:
+        console.print("[yellow]No Ollama models found. Make sure Ollama is running correctly.[/yellow]")
+        console.print("[yellow]Using default model setting. You may need to pull it: `ollama pull llava`[/yellow]")
+        return DEFAULT_MODEL
+    
+    # Create table of models
+    table = Table(title="Available Vision Models")
+    table.add_column("#", style="cyan", justify="right")
+    table.add_column("Model Name", style="green")
+    table.add_column("Status", style="magenta")
+    
+    # Add suggested models first
+    row_num = 1
+    for model in suggested_models:
+        table.add_row(str(row_num), model, "[cyan]Recommended[/cyan]")
+        row_num += 1
+        
+    # Add other potential models
+    for model in other_models:
+        table.add_row(str(row_num), model, "[yellow]Other[/yellow]")
+        row_num += 1
+        
+    console.print(table)
+    
+    # Get user choice
+    if not all_models:
+        return DEFAULT_MODEL
+    
+    choice = Prompt.ask(
+        "Select model number or type custom model name",
+        default="1"
+    )
+    
+    try:
+        choice_idx = int(choice) - 1
+        if 0 <= choice_idx < len(all_models):
+            return all_models[choice_idx]
+        else:
+            # Out of range - treat as custom input
+            return choice.strip()
+    except ValueError:
+        # Not a number - treat as custom input
+        return choice.strip()
+
 # Modify the main function to properly handle model provider selection
 async def main():
     """Main application flow"""
@@ -659,27 +746,44 @@ async def main():
                 console.print("[blue]Installation instructions: https://ollama.com/download[/blue]")
                 return
             
-            # Check for the vision model
-            model = DEFAULT_MODEL
-            if check_ollama_model(model):
-                console.print(f"[green]✓ {model} model is available[/green]")
-            else:
-                # Try alternate model names
-                alternate_models = ['llava', 'bakllava', 'llama3-vision']
-                
-                found_alt = False
-                for alt_model in alternate_models:
-                    if check_ollama_model(alt_model):
-                        console.print(f"[yellow]! {model} not found, but {alt_model} is available[/yellow]")
-                        if Confirm.ask(f"Would you like to use {alt_model} instead?"):
-                            model = alt_model
-                            console.print(f"[green]✓ Using {alt_model} model instead[/green]")
-                            found_alt = True
-                            break
-                
-                if not found_alt:
-                    console.print(f"[yellow]! {model} model not found. You may need to run:[/yellow]")
-                    console.print(f"[blue]  ollama pull {model}[/blue]")
+            # Select from available models
+            model = await select_ollama_model()
+            console.print(f"[green]Selected model: {model}[/green]")
+            
+            # Check if model exists
+            if not check_ollama_model(model):
+                console.print(f"[yellow]! {model} model not found. Would you like to pull it now?[/yellow]")
+                if Confirm.ask(f"Pull {model} from Ollama?", default=True):
+                    console.print(f"[cyan]Pulling {model}...[/cyan]")
+                    console.print(f"[blue]This may take a while depending on your internet connection and the model size.[/blue]")
+                    
+                    try:
+                        # Use subprocess for live output since ollama.pull() doesn't show progress
+                        import subprocess
+                        pull_process = subprocess.Popen(
+                            ["ollama", "pull", model],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            universal_newlines=True
+                        )
+                        
+                        # Show progress output
+                        for line in pull_process.stdout:
+                            console.print(f"[dim]{line.strip()}[/dim]")
+                        
+                        pull_process.wait()
+                        if pull_process.returncode == 0:
+                            console.print(f"[green]✓ Successfully pulled {model}[/green]")
+                        else:
+                            console.print(f"[red]Failed to pull {model}[/red]")
+                            if not Confirm.ask("Continue anyway?"):
+                                return
+                    except Exception as e:
+                        console.print(f"[yellow]Error pulling model: {e}[/yellow]")
+                        if not Confirm.ask("Continue anyway?"):
+                            return
+                else:
+                    console.print("[yellow]Continuing without pulling the model...[/yellow]")
                     if not Confirm.ask("Continue anyway?"):
                         return
         
@@ -735,8 +839,9 @@ async def main():
             console.print("  3. Customize extraction prompt")
             console.print("  4. Process screenshots and extract data")
             console.print("  5. Generate transcript")
-            console.print("  6. Change model provider") # New option
-            console.print("  7. Exit")
+            console.print("  6. Change model") # Modified to be more generic
+            console.print("  7. Change provider") # Changed position
+            console.print("  8. Exit") # Updated number
             
             # Current status display
             console.print(f"\n[blue]Current directory:[/blue] {current_directory}")
@@ -744,7 +849,7 @@ async def main():
             console.print(f"[blue]Current provider:[/blue] {provider}")
             
             # Get user choice
-            choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
+            choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
             
             if choice == "1":
                 # Step 1: Select directory with screenshots
@@ -848,8 +953,65 @@ async def main():
                         console.print(f"[yellow]Could not open file: {str(e)}[/yellow]")
             
             elif choice == "6":
-                # Change model provider
-                console.print("\n[bold]Change model provider:[/bold]")
+                # Change model (different from changing provider)
+                console.print("\n[bold]Change Model:[/bold]")
+                
+                if provider == "ollama":
+                    # Select a different Ollama model
+                    new_model = await select_ollama_model()
+                    
+                    if new_model != model:
+                        # Check if model exists
+                        if not check_ollama_model(new_model):
+                            console.print(f"[yellow]! {new_model} model not found. Would you like to pull it now?[/yellow]")
+                            if Confirm.ask(f"Pull {new_model} from Ollama?", default=True):
+                                console.print(f"[cyan]Pulling {new_model}...[/cyan]")
+                                
+                                try:
+                                    # Use subprocess for live output 
+                                    import subprocess
+                                    pull_process = subprocess.Popen(
+                                        ["ollama", "pull", new_model],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        universal_newlines=True
+                                    )
+                                    
+                                    # Show progress output
+                                    for line in pull_process.stdout:
+                                        console.print(f"[dim]{line.strip()}[/dim]")
+                                    
+                                    pull_process.wait()
+                                    if pull_process.returncode == 0:
+                                        console.print(f"[green]✓ Successfully pulled {new_model}[/green]")
+                                        model = new_model
+                                    else:
+                                        console.print(f"[red]Failed to pull {new_model}[/red]")
+                                except Exception as e:
+                                    console.print(f"[yellow]Error pulling model: {e}[/yellow]")
+                            else:
+                                console.print("[yellow]Continuing without changing model.[/yellow]")
+                        else:
+                            model = new_model
+                            console.print(f"[green]Model changed to {model}.[/green]")
+                
+                elif provider == "deepseek":
+                    # For DeepSeek, model options are more limited
+                    console.print("[cyan]Available DeepSeek vision models:[/cyan]")
+                    console.print("1. deepseek-vision (default)")
+                    console.print("2. deepseek-vl (alternative)")
+                    
+                    model_choice = Prompt.ask("Choose model", choices=["1", "2"], default="1")
+                    if model_choice == "1":
+                        model = "deepseek-vision"
+                    else:
+                        model = "deepseek-vl"
+                    
+                    console.print(f"[green]Model changed to {model}.[/green]")
+            
+            elif choice == "7":
+                # Change provider (was option 6 before)
+                console.print("\n[bold]Change Provider:[/bold]")
                 console.print("1. Ollama (local models)")
                 if DEEPSEEK_SUPPORT:
                     console.print("2. DeepSeek API (cloud-based)")
@@ -861,15 +1023,12 @@ async def main():
                 
                 if new_provider != provider:
                     provider = new_provider
-                    # Setup provider-specific configuration
+                    # Provider-specific setup (similar to initial setup)
                     if provider == "ollama":
-                        # Check Ollama connection and model
                         try:
                             ollama.list()
                             console.print("[green]✓ Connected to Ollama successfully[/green]")
-                            model = DEFAULT_MODEL
-                            if not check_ollama_model(model):
-                                console.print(f"[yellow]! {model} model not found, please check available models.[/yellow]")
+                            model = await select_ollama_model()
                         except Exception as e:
                             console.print(f"[bold red]Error: Could not connect to Ollama: {str(e)}[/bold red]")
                     
@@ -890,14 +1049,14 @@ async def main():
                         # Set model to DeepSeek model
                         model = DEFAULT_DEEPSEEK_MODEL
                 
-                console.print(f"[green]Provider changed to {provider}.[/green]")
+                console.print(f"[green]Provider changed to {provider}, model set to {model}.[/green]")
             
-            elif choice == "7":
+            elif choice == "8":
                 console.print("[cyan]Exiting application.[/cyan]")
                 break
                 
             # Add a small pause between menu displays
-            if choice != "7":
+            if choice != "8":
                 console.print("\nPress Enter to continue...")
                 input()
                 
