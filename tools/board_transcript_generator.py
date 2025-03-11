@@ -624,111 +624,294 @@ def display_data_summary(data: List[Dict[str, Any]]) -> Table:
     
     return table
 
+# Modify the main function to properly handle model provider selection
 async def main():
     """Main application flow"""
-    clear()
-    console.print(banner())
-    
-    check_requirements()
-    
-    # Set up initial state
-    current_directory = os.getcwd()
-    prompt = DEFAULT_PROMPT
-    model = DEFAULT_MODEL
-    provider = DEFAULT_PROVIDER
-    
-    # Step 1: Select directory with screenshots
-    console.print("\n[bold]Step 1: Select directory containing screenshots[/bold]")
-    current_directory = await interactive_directory_browser(current_directory)
-    
-    # Step 2: Select files for analysis
-    console.print("\n[bold]Step 2: Select screenshots for analysis[/bold]")
-    file_paths = await select_files_for_analysis(current_directory)
-    
-    if not file_paths:
-        console.print("[yellow]No files selected. Exiting.[/yellow]")
-        return
-    
-    console.print(f"[green]Selected {len(file_paths)} files for analysis.[/green]")
-    
-    # Step 3: Customize prompt if needed
-    console.print("\n[bold]Step 3: Customize extraction prompt[/bold]")
-    console.print("[blue]Current prompt:[/blue]")
-    console.print(Panel(prompt, title="Extraction Prompt", border_style="blue"))
-    
-    if Confirm.ask("Would you like to customize the extraction prompt?", default=False):
-        # Show simplified explanation of what the prompt should accomplish
-        console.print("[yellow]The prompt should instruct the model to extract:[/yellow]")
-        console.print("- Date and time of message")
-        console.print("- Sender and recipients")
-        console.print("- Message content")
-        console.print("- Platform (email, text, etc.)")
-        console.print("- Format as JSON")
-        
-        new_prompt = Prompt.ask("Enter new prompt (or press Enter to keep current)", default=prompt)
-        prompt = new_prompt
-    
-    # Step 4: Process screenshots and extract data
-    console.print("\n[bold]Step 4: Process screenshots and extract message data[/bold]")
-    data = await process_screenshots(file_paths, prompt, model, provider)
-    
-    if not data:
-        console.print("[yellow]No data extracted. Exiting.[/yellow]")
-        return
-    
-    # Display summary of extracted data
-    console.print(display_data_summary(data))
-    
-    # Save extracted data
-    data_file = await save_extracted_data(data, current_directory)
-    console.print(f"[green]Extracted data saved to: {data_file}[/green]")
-    
-    # Step 5: Generate transcript from extracted data
-    console.print("\n[bold]Step 5: Generate chronological transcript[/bold]")
-    
-    # Get API credentials if using DeepSeek
-    api_key = None
-    api_url = None
-    if provider == 'deepseek':
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        api_url = os.environ.get("DEEPSEEK_API_URL", DEFAULT_DEEPSEEK_API_URL)
-    
-    transcript = await analyze_communications(data, model, provider, api_key, api_url)
-    
-    if transcript.startswith("ERROR:"):
-        console.print(f"[bold red]{transcript}[/bold red]")
-        return
-    
-    # Save transcript to file
-    transcript_file = await save_transcript(transcript, current_directory)
-    console.print(f"[green]Transcript saved to: {transcript_file}[/green]")
-    
-    # Display transcript preview
-    console.print(Panel(
-        transcript[:1000] + ("..." if len(transcript) > 1000 else ""),
-        title="Transcript Preview (first 1000 characters)",
-        border_style="green"
-    ))
-    
-    # Ask if user wants to open the transcript
-    if Confirm.ask("\nOpen the transcript file?", default=True):
-        try:
-            if sys.platform == 'darwin':  # macOS
-                os.system(f'open "{transcript_file}"')
-            elif sys.platform == 'win32':  # Windows
-                os.system(f'start "" "{transcript_file}"')
-            else:  # Linux
-                os.system(f'xdg-open "{transcript_file}"')
-        except Exception as e:
-            console.print(f"[yellow]Could not open file: {str(e)}[/yellow]")
-
-if __name__ == "__main__":
     try:
-        # Run the async main function
-        asyncio.run(main())
+        clear()
+        console.print(banner())
+        
+        # First, check for DeepSeek support
+        if not DEEPSEEK_SUPPORT:
+            console.print("[yellow]Note: DeepSeek API support requires the 'openai' package.[/yellow]")
+            console.print("[yellow]To enable DeepSeek support, install with: pip install openai[/yellow]")
+        
+        # Initial provider selection
+        console.print("\n[bold]Select model provider:[/bold]")
+        console.print("1. Ollama (local models)")
+        if DEEPSEEK_SUPPORT:
+            console.print("2. DeepSeek API (cloud-based)")
+            provider_choice = Prompt.ask("Choose provider", choices=["1", "2"], default="1")
+            provider = "ollama" if provider_choice == "1" else "deepseek"
+        else:
+            console.print("[dim]2. DeepSeek API (requires 'openai' package - unavailable)[/dim]")
+            provider = "ollama"
+        
+        # Setup provider-specific configuration
+        if provider == "ollama":
+            # Check if Ollama is running
+            try:
+                ollama.list()
+                console.print("[green]✓ Connected to Ollama successfully[/green]")
+            except Exception as e:
+                console.print(f"[bold red]Error: Could not connect to Ollama: {str(e)}[/bold red]")
+                console.print("[yellow]Make sure Ollama is installed and running.[/yellow]")
+                console.print("[blue]Installation instructions: https://ollama.com/download[/blue]")
+                return
+            
+            # Check for the vision model
+            model = DEFAULT_MODEL
+            if check_ollama_model(model):
+                console.print(f"[green]✓ {model} model is available[/green]")
+            else:
+                # Try alternate model names
+                alternate_models = ['llava', 'bakllava', 'llama3-vision']
+                
+                found_alt = False
+                for alt_model in alternate_models:
+                    if check_ollama_model(alt_model):
+                        console.print(f"[yellow]! {model} not found, but {alt_model} is available[/yellow]")
+                        if Confirm.ask(f"Would you like to use {alt_model} instead?"):
+                            model = alt_model
+                            console.print(f"[green]✓ Using {alt_model} model instead[/green]")
+                            found_alt = True
+                            break
+                
+                if not found_alt:
+                    console.print(f"[yellow]! {model} model not found. You may need to run:[/yellow]")
+                    console.print(f"[blue]  ollama pull {model}[/blue]")
+                    if not Confirm.ask("Continue anyway?"):
+                        return
+        
+        elif provider == "deepseek":
+            # Get API key
+            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+            api_url = os.environ.get("DEEPSEEK_API_URL", DEFAULT_DEEPSEEK_API_URL)
+            
+            if api_key:
+                if Confirm.ask("Found DEEPSEEK_API_KEY in environment. Use it?", default=True):
+                    console.print("[green]✓ Using API key from environment variable[/green]")
+                else:
+                    api_key = Prompt.ask("Enter your DeepSeek API key", password=True)
+            else:
+                api_key = Prompt.ask("Enter your DeepSeek API key", password=True)
+            
+            # Ask about custom API URL
+            if Confirm.ask("Use custom API URL? (default is https://api.deepseek.com)", default=False):
+                api_url = Prompt.ask("Enter DeepSeek API URL", default=DEFAULT_DEEPSEEK_API_URL)
+            
+            # Save to environment for later use by process functions
+            os.environ["DEEPSEEK_API_KEY"] = api_key
+            os.environ["DEEPSEEK_API_URL"] = api_url
+            
+            # Validate API key
+            console.print("[yellow]Validating DeepSeek API credentials...[/yellow]")
+            if check_deepseek_api(api_key, api_url):
+                console.print("[green]✓ DeepSeek API connection successful[/green]")
+                model = DEFAULT_DEEPSEEK_MODEL
+            else:
+                console.print("[bold red]Error: Could not validate DeepSeek API credentials[/bold red]")
+                if not Confirm.ask("Continue anyway?"):
+                    return
+                model = DEFAULT_DEEPSEEK_MODEL
+        
+        # Press Enter to continue
+        console.print("\nPress Enter to continue to the main menu...")
+        input()
+        
+        # Set up initial state
+        current_directory = os.getcwd()
+        prompt = DEFAULT_PROMPT
+        
+        # Main application loop
+        while True:
+            clear()
+            console.print(banner())
+            
+            # Always display the menu options
+            console.print("\n[bold cyan]Menu Options:[/bold cyan]")
+            console.print("  1. Select directory containing screenshots")
+            console.print("  2. Select screenshots for analysis")
+            console.print("  3. Customize extraction prompt")
+            console.print("  4. Process screenshots and extract data")
+            console.print("  5. Generate transcript")
+            console.print("  6. Change model provider") # New option
+            console.print("  7. Exit")
+            
+            # Current status display
+            console.print(f"\n[blue]Current directory:[/blue] {current_directory}")
+            console.print(f"[blue]Current model:[/blue] {model}")
+            console.print(f"[blue]Current provider:[/blue] {provider}")
+            
+            # Get user choice
+            choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
+            
+            if choice == "1":
+                # Step 1: Select directory with screenshots
+                console.print("\n[bold]Step 1: Select directory containing screenshots[/bold]")
+                try:
+                    # Try the async version in a new event loop
+                    current_directory = await interactive_directory_browser(current_directory)
+                except Exception as e:
+                    console.print(f"[yellow]Error with directory browser: {str(e)}[/yellow]")
+            
+            elif choice == "2":
+                # Step 2: Select files for analysis
+                console.print("\n[bold]Step 2: Select screenshots for analysis[/bold]")
+                file_paths = await select_files_for_analysis(current_directory)
+                
+                if not file_paths:
+                    console.print("[yellow]No files selected.[/yellow]")
+                    continue
+                
+                console.print(f"[green]Selected {len(file_paths)} files for analysis.[/green]")
+            
+            elif choice == "3":
+                # Step 3: Customize prompt if needed
+                console.print("\n[bold]Step 3: Customize extraction prompt[/bold]")
+                console.print("[blue]Current prompt:[/blue]")
+                console.print(Panel(prompt, title="Extraction Prompt", border_style="blue"))
+                
+                # Show simplified explanation of what the prompt should accomplish
+                console.print("[yellow]The prompt should instruct the model to extract:[/yellow]")
+                console.print("- Date and time of message")
+                console.print("- Sender and recipients")
+                console.print("- Message content")
+                console.print("- Platform (email, text, etc.)")
+                console.print("- Format as JSON")
+                
+                new_prompt = Prompt.ask("Enter new prompt (or press Enter to keep current)", default=prompt)
+                prompt = new_prompt
+            
+            elif choice == "4":
+                # Step 4: Process screenshots and extract data
+                console.print("\n[bold]Step 4: Process screenshots and extract data[/bold]")
+                if not 'file_paths' in locals() or not file_paths:
+                    console.print("[yellow]No files selected. Please select files first (option 2).[/yellow]")
+                    continue
+                    
+                data = await process_screenshots(file_paths, prompt, model, provider)
+                
+                if not data:
+                    console.print("[yellow]No data extracted.[/yellow]")
+                    continue
+                
+                # Display summary of extracted data
+                console.print(display_data_summary(data))
+                
+                # Save extracted data
+                data_file = await save_extracted_data(data, current_directory)
+                console.print(f"[green]Extracted data saved to: {data_file}[/green]")
+            
+            elif choice == "5":
+                # Step 5: Generate transcript from extracted data
+                console.print("\n[bold]Step 5: Generate chronological transcript[/bold]")
+                
+                if not 'data' in locals() or not data:
+                    console.print("[yellow]No data extracted. Please process files first (option 4).[/yellow]")
+                    continue
+                
+                # Get API credentials if using DeepSeek
+                api_key = None
+                api_url = None
+                if provider == 'deepseek':
+                    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+                    api_url = os.environ.get("DEEPSEEK_API_URL", DEFAULT_DEEPSEEK_API_URL)
+                
+                transcript = await analyze_communications(data, model, provider, api_key, api_url)
+                
+                if transcript.startswith("ERROR:"):
+                    console.print(f"[bold red]{transcript}[/bold red]")
+                    continue
+                
+                # Save transcript to file
+                transcript_file = await save_transcript(transcript, current_directory)
+                console.print(f"[green]Transcript saved to: {transcript_file}[/green]")
+                
+                # Display transcript preview
+                console.print(Panel(
+                    transcript[:1000] + ("..." if len(transcript) > 1000 else ""),
+                    title="Transcript Preview (first 1000 characters)",
+                    border_style="green"
+                ))
+                
+                # Ask if user wants to open the transcript
+                if Confirm.ask("\nOpen the transcript file?", default=True):
+                    try:
+                        if sys.platform == 'darwin':  # macOS
+                            os.system(f'open "{transcript_file}"')
+                        elif sys.platform == 'win32':  # Windows
+                            os.system(f'start "" "{transcript_file}"')
+                        else:  # Linux
+                            os.system(f'xdg-open "{transcript_file}"')
+                    except Exception as e:
+                        console.print(f"[yellow]Could not open file: {str(e)}[/yellow]")
+            
+            elif choice == "6":
+                # Change model provider
+                console.print("\n[bold]Change model provider:[/bold]")
+                console.print("1. Ollama (local models)")
+                if DEEPSEEK_SUPPORT:
+                    console.print("2. DeepSeek API (cloud-based)")
+                    provider_choice = Prompt.ask("Choose provider", choices=["1", "2"], default="1")
+                    new_provider = "ollama" if provider_choice == "1" else "deepseek"
+                else:
+                    console.print("[dim]2. DeepSeek API (requires 'openai' package - unavailable)[/dim]")
+                    new_provider = "ollama"
+                
+                if new_provider != provider:
+                    provider = new_provider
+                    # Setup provider-specific configuration
+                    if provider == "ollama":
+                        # Check Ollama connection and model
+                        try:
+                            ollama.list()
+                            console.print("[green]✓ Connected to Ollama successfully[/green]")
+                            model = DEFAULT_MODEL
+                            if not check_ollama_model(model):
+                                console.print(f"[yellow]! {model} model not found, please check available models.[/yellow]")
+                        except Exception as e:
+                            console.print(f"[bold red]Error: Could not connect to Ollama: {str(e)}[/bold red]")
+                    
+                    elif provider == "deepseek":
+                        # Get or update DeepSeek API key
+                        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+                        api_url = os.environ.get("DEEPSEEK_API_URL", DEFAULT_DEEPSEEK_API_URL)
+                        
+                        if not api_key or not Confirm.ask("Use existing API key?", default=True):
+                            api_key = Prompt.ask("Enter your DeepSeek API key", password=True)
+                            os.environ["DEEPSEEK_API_KEY"] = api_key
+                        
+                        # Ask about custom API URL
+                        if Confirm.ask("Use custom API URL?", default=False):
+                            api_url = Prompt.ask("Enter DeepSeek API URL", default=DEFAULT_DEEPSEEK_API_URL)
+                            os.environ["DEEPSEEK_API_URL"] = api_url
+                        
+                        # Set model to DeepSeek model
+                        model = DEFAULT_DEEPSEEK_MODEL
+                
+                console.print(f"[green]Provider changed to {provider}.[/green]")
+            
+            elif choice == "7":
+                console.print("[cyan]Exiting application.[/cyan]")
+                break
+                
+            # Add a small pause between menu displays
+            if choice != "7":
+                console.print("\nPress Enter to continue...")
+                input()
+                
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user. Exiting...[/yellow]")
-        sys.exit(0)
     except Exception as e:
         console.print(f"[bold red]Unexpected error: {str(e)}[/bold red]")
-        sys.exit(1)
+        import traceback
+        console.print(traceback.format_exc())
+
+if __name__ == "__main__":
+    # Ensure proper event loop handling - fixes common asyncio issues
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Run the async main function directly
+    asyncio.run(main())
