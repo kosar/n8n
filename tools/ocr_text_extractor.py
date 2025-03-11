@@ -213,6 +213,94 @@ async def interactive_directory_browser(start_dir: str = os.getcwd()) -> str:
         except Exception as e:
             console.print(f"[bold red]Error: {str(e)}[/bold red]")
 
+async def interactive_file_picker(start_dir: str = os.getcwd(), file_extension: str = ".txt") -> str:
+    """Interactive file picker with autocomplete for specific file types"""
+    console.clear()
+    console.print(banner())
+    
+    session = PromptSession()
+    completer = PathCompleter(
+        only_directories=False,
+        file_filter=lambda path: path.endswith(file_extension),
+        expanduser=True,
+    )
+    
+    current_dir = os.path.abspath(start_dir)
+    
+    while True:
+        try:
+            console.print(f"[blue]Current directory:[/blue] {current_dir}")
+            console.print(f"[yellow]Type file path or '..' to go up, or press Enter to select this directory[/yellow]")
+            
+            user_input = await session.prompt_async("File> ", completer=completer)
+            
+            if not user_input:
+                return current_dir
+            
+            # Handle special case for parent directory
+            if user_input == "..":
+                current_dir = os.path.dirname(current_dir)
+                continue
+                
+            # Handle relative or absolute path
+            if os.path.isabs(user_input):
+                path = user_input
+            else:
+                path = os.path.join(current_dir, user_input)
+                
+            # Normalize the path (resolve .. and symlinks)
+            path = os.path.normpath(os.path.expanduser(path))
+            
+            if os.path.isfile(path):
+                return path
+            else:
+                console.print("[bold red]Not a valid file. Please try again.[/bold red]")
+                
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            console.print(f"[bold red]Error: {str(e)}[/bold red]")
+
+async def read_prompt_from_file() -> str:
+    """Read prompt text from a selected file"""
+    console.print("\n[bold]Select a file containing the prompt text[/bold]")
+    file_path = await interactive_file_picker()
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        console.print(f"[bold red]Error reading file: {str(e)}[/bold red]")
+        return ""
+
+def combine_prompts(pre_prompt: str, main_prompt: str, post_prompt: str) -> str:
+    """Combine pre, main, and post prompts into a single prompt"""
+    return f"{pre_prompt}\n\n{main_prompt}\n\n{post_prompt}"
+
+async def get_combined_prompt(base_prompt: str) -> str:
+    """Get combined prompt with pre and post prompts from user input files"""
+    pre_prompt = ""
+    post_prompt = ""
+    
+    console.print("\n[bold]Select a file for the pre-prompt (optional)[/bold]")
+    if Confirm.ask("Add a pre-prompt from a file?", default=False):
+        pre_prompt = await read_prompt_from_file()
+    
+    console.print("\n[bold]Select a file for the post-prompt (optional)[/bold]")
+    if Confirm.ask("Add a post-prompt from a file?", default=False):
+        post_prompt = await read_prompt_from_file()
+    
+    combined_prompt = combine_prompts(pre_prompt, base_prompt, post_prompt)
+    
+    console.print("\n[bold]Combined Prompt Preview:[/bold]")
+    console.print(Panel(combined_prompt, title="Combined Prompt", border_style="blue"))
+    
+    if Confirm.ask("Is this prompt correct?", default=True):
+        return combined_prompt
+    else:
+        console.print("[yellow]Prompt editing cancelled. Please try again.[/yellow]")
+        return ""
+
 # Enhanced image preprocessing for better OCR quality
 def preprocess_image(image_path: str) -> np.ndarray:
     """Preprocess the image to improve OCR results specifically for text messages"""
@@ -1168,6 +1256,9 @@ async def send_to_model(results_file: str, prompt_style: str = "detailed"):
             console.print("[blue]Current prompt template:[/blue]")
             console.print(Panel(ANALYSIS_PROMPT, title="Analysis Prompt", border_style="blue"))
             prompt = Prompt.ask("Enter custom prompt", default=ANALYSIS_PROMPT)
+        
+        # Get combined prompt with pre and post prompts
+        prompt = await get_combined_prompt(base_prompt)
         
         # Prepare simple version of data for the prompt
         simplified_data = []
