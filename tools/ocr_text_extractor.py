@@ -47,6 +47,10 @@ Format your analysis as a beautiful, narrative-style markdown document:
 - Use markdown tables where appropriate to organize information
 - Use bold and italics to highlight key points and decisions
 - Refer to the source images or OCR data as needed for context so users can click through. Use links.
+
+This task requires a keen eye for detail, logical reasoning, and a touch of creativity to fill in the gaps. Good luck!
+
+Make sure the markdown is well-formatted, easy to read, and captures the essence of the conversation. It should be absolutely gorgeous too. 
 """
 
 # Initialize Rich console
@@ -58,8 +62,7 @@ def load_config() -> Dict[str, Any]:
         "last_directory": os.getcwd(),
         "output_directory": DEFAULT_OUTPUT_DIR,
         "last_language": "eng",
-        "pre_prompt": "",
-        "post_prompt": ""
+        "selected_model": "llava:latest"
     }
     
     try:
@@ -106,6 +109,31 @@ def check_tesseract_installation() -> bool:
         console.print("[blue]macOS installation:[/blue]")
         console.print("brew install tesseract")
         return False
+        
+def check_ollama_status() -> bool:
+    """Check if Ollama server is running and display model information"""
+    try:
+        import ollama
+        config = load_config()
+        selected_model = config.get("selected_model", "llava:latest")
+        
+        models = get_available_models()
+        if models:
+            model_count = len(models)
+            model_list = ", ".join(models[:3]) + ("..." if len(models) > 3 else "")
+            console.print(f"[green]✓ Ollama server detected ({model_count} models available: {model_list})[/green]")
+            console.print(f"[green]  Current model: {selected_model}[/green]")
+            return True
+        else:
+            console.print("[yellow]⚠ Ollama server found but no models available.[/yellow]")
+            return False
+    except ImportError:
+        console.print("[yellow]⚠ Ollama Python package not installed.[/yellow]")
+        console.print("[yellow]  Install with: pip install ollama[/yellow]")
+        return False
+    except Exception as e:
+        console.print(f"[yellow]⚠ Ollama server not accessible: {str(e)}[/yellow]")
+        return False
 
 def select_directory() -> str:
     """Simple directory selection via prompt"""
@@ -116,6 +144,9 @@ def select_directory() -> str:
     if not os.path.isdir(directory):
         console.print("[red]Invalid directory.[/red]")
         return os.getcwd()
+    
+    file_count = len(get_all_images_in_directory(directory))
+    console.print(f"[green]Found {file_count} supported image files in the selected directory.[/green]")
     
     return directory
 
@@ -172,10 +203,10 @@ async def clean_text_with_ollama(text: str) -> str:
     """Clean the OCR text using Ollama."""
     try:
         import ollama
-        prompt = f"Correct and clean the following OCR text:\n\n{text}\n\nCleaned Text:"
+        prompt = f"Correct and clean the following OCR text and do not provide any preamble in your response, only the cleaned up text.:\n\n{text}\n\nCleaned Text:"
 
         response = ollama.chat(
-            model="llama3.2",
+            model="llava:latest",
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.1}
         )
@@ -439,8 +470,112 @@ async def create_markdown_summary(data: List[Dict[str, Any]], results_file: str,
     
     return output_path
 
+def get_full_prompt(data: List[Dict[str, Any]]) -> str:
+    """Generate the full prompt that would be sent to the model"""
+    simplified_data = []
+    for result in data:
+        simplified_entry = {
+            "filename": result.get("filename", "unknown"),
+            "text": result.get("text", ""),
+        }
+        if "date" in result:
+            simplified_entry["date"] = result["date"]
+        if "sender" in result:
+            simplified_entry["sender"] = result["sender"]
+        simplified_data.append(simplified_entry)
+    
+    post_prompt = ""
+    post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+    if os.path.exists(post_prompt_file):
+        try:
+            with open(post_prompt_file, 'r', encoding='utf-8') as f:
+                post_prompt = f.read()
+        except Exception as e:
+            console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
+    
+    prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
+    prompt += json.dumps(simplified_data, indent=2)
+    
+    if post_prompt:
+        prompt += "\n\n" + post_prompt
+    
+    return prompt
+
+def display_full_prompt() -> None:
+    """Display the full prompt that would be sent to the model"""
+    try:
+        # Use the selected directory from config instead of current working directory
+        config = load_config()
+        selected_dir = config.get("last_directory", os.getcwd())
+        
+        console.print(f"[cyan]Looking for images in: {selected_dir}[/cyan]")
+        file_paths = get_all_images_in_directory(selected_dir)
+        
+        if not file_paths:
+            console.print("[yellow]No supported image files found in the selected directory.[/yellow]")
+            console.print("[yellow]Supported extensions: {0}[/yellow]".format(", ".join(SUPPORTED_EXTENSIONS)))
+            return
+        
+        console.print(f"[green]Found {len(file_paths)} image files.[/green]")
+        mock_results = [{"filename": os.path.basename(path), "text": "Sample OCR text for preview"} for path in file_paths[:3]]
+        prompt = get_full_prompt(mock_results)
+        
+        console.print("[bold cyan]Full Prompt Preview:[/bold cyan]")
+        console.print(Panel(prompt, width=100, border_style="green"))
+        
+        post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+        if not os.path.exists(post_prompt_file):
+            console.print("\n[yellow]Note: 'postprompt.txt' not found in the application directory:[/yellow]")
+            console.print(f"[yellow]{os.path.dirname(os.path.abspath(__file__))}[/yellow]")
+            console.print("[yellow]Create this file to add custom instructions to the prompt.[/yellow]")
+        
+    except Exception as e:
+        console.print(f"[bold red]Error displaying prompt: {str(e)}[/bold red]")
+
+def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Display and handle the configuration menu"""
+    while True:
+        console.print("\n[bold cyan]Configuration Menu:[/bold cyan]")
+        console.print("  1. View full prompt")
+        console.print("  2. View available models")
+        console.print("  3. Select model")
+        console.print("  4. Back to main menu")
+        
+        choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4"], default="4")
+        
+        if choice == "1":
+            display_full_prompt()
+            console.print("[blue]Note: Custom prompt extensions should be placed in 'postprompt.txt' in the application folder.[/blue]")
+        
+        elif choice == "2":
+            models = get_available_models()
+            if models:
+                console.print("[blue]Available models:[/blue]")
+                for model in models:
+                    console.print(f"  - {model}")
+            else:
+                console.print("[red]No models available or Ollama not reachable.[/red]")
+        
+        elif choice == "3":
+            models = get_available_models()
+            if models:
+                console.print("[blue]Available models:[/blue]")
+                for model in models:
+                    console.print(f"  - {model}")
+                selected_model = Prompt.ask("Enter the model name to select", choices=models, default=config.get("selected_model", "llava:latest"))
+                config["selected_model"] = selected_model
+                save_config(config)
+                console.print(f"[green]Model updated to {selected_model}.[/green]")
+            else:
+                console.print("[red]No models available or Ollama not reachable.[/red]")
+        
+        elif choice == "4":
+            break
+    
+    return config
+
 async def analyze_with_ollama(results_file: str, output_dir: str):
-    """Analyze OCR results with Ollama using llama3"""
+    """Analyze OCR results with Ollama using the selected model"""
     try:
         import ollama
 
@@ -456,6 +591,20 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
         markdown_path = await create_markdown_summary(results, results_file, image_map)
         console.print(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
 
+        # Read postprompt.txt if it exists
+        post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+        post_prompt = ""
+        if os.path.exists(post_prompt_file):
+            try:
+                with open(post_prompt_file, 'r', encoding='utf-8') as f:
+                    post_prompt = f.read()
+                console.print(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
+        else:
+            console.print(f"[yellow]Note: 'postprompt.txt' not found. Using default prompt only.[/yellow]")
+
+        # Generate the prompt with simplified data and post-prompt
         simplified_data = []
         for result in results:
             simplified_entry = {
@@ -468,27 +617,19 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
                 simplified_entry["sender"] = result["sender"]
             simplified_data.append(simplified_entry)
 
-        post_prompt_file = "postprompt.txt"
-        post_prompt = ""
-        if os.path.exists(post_prompt_file):
-            try:
-                with open(post_prompt_file, 'r', encoding='utf-8') as f:
-                    post_prompt = f.read()
-                console.print(f"[green]✓ Loaded custom post-prompt from {post_prompt_file}[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Error reading {post_prompt_file}: {str(e)}[/yellow]")
-                console.print("[yellow]Continuing with default post-prompt...[/yellow]")
-
         prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
         prompt += json.dumps(simplified_data, indent=2)
-        prompt += "\n\n" + post_prompt
+        
+        if post_prompt:
+            prompt += "\n\n" + post_prompt
 
-        model_name = "llama3.2"
+        config = load_config()
+        model_name = config.get("selected_model", "llava:latest")
 
         console.print(f"[cyan]Checking Ollama model: {model_name}[/cyan]")
         try:
             models = ollama.list()
-            model_names = [m.get("name") for m in models.models] if hasattr(models, 'models') else [m.get("name") for m in models["models"]]
+            model_names = [m.model for m in models if hasattr(m, 'model')]
 
             if model_name not in model_names:
                 console.print(f"[yellow]Model {model_name} not found. Pulling from repository...[/yellow]")
@@ -556,51 +697,25 @@ def get_available_models() -> List[str]:
     try:
         import ollama
         models = ollama.list()
-        return [m.get("name") for m in models.models] if hasattr(models, 'models') else [m.get("name") for m in models["models"]]
+        if isinstance(models, list):
+            return [m.model for m in models if hasattr(m, 'model')]
+        elif hasattr(models, 'models') and isinstance(models.models, list):
+            return [m.model for m in models.models if hasattr(m, 'model')]
+        elif isinstance(models, dict) and "models" in models and isinstance(models["models"], list):
+            return [m.model for m in models["models"] if hasattr(m, 'model')]
+        else:
+            console.print("[yellow]No models found in the response.[/yellow]")
+            return []
     except Exception as e:
         console.print(f"[yellow]Error fetching models: {str(e)}[/yellow]")
         return []
-
-def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Display and handle the configuration menu"""
-    while True:
-        console.print("\n[bold cyan]Configuration Menu:[/bold cyan]")
-        console.print("  1. Set pre-prompt")
-        console.print("  2. Set post-prompt")
-        console.print("  3. View available models")
-        console.print("  4. Back to main menu")
-        
-        choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4"], default="4")
-        
-        if choice == "1":
-            config["pre_prompt"] = Prompt.ask("Enter pre-prompt", default=config.get("pre_prompt", ""))
-            save_config(config)
-            console.print("[green]Pre-prompt updated.[/green]")
-        
-        elif choice == "2":
-            config["post_prompt"] = Prompt.ask("Enter post-prompt", default=config.get("post_prompt", ""))
-            save_config(config)
-            console.print("[green]Post-prompt updated.[/green]")
-        
-        elif choice == "3":
-            models = get_available_models()
-            if models:
-                console.print("[blue]Available models:[/blue]")
-                for model in models:
-                    console.print(f"  - {model}")
-            else:
-                console.print("[red]No models available or Ollama not reachable.[/red]")
-        
-        elif choice == "4":
-            break
-    
-    return config
 
 async def main():
     """Main application flow"""
     try:
         console.print(banner())
         check_tesseract_installation()
+        check_ollama_status()  # Add Ollama status check
         
         config = load_config()
         current_directory = config.get("last_directory", os.getcwd())
