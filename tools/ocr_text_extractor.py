@@ -57,7 +57,9 @@ def load_config() -> Dict[str, Any]:
     default_config = {
         "last_directory": os.getcwd(),
         "output_directory": DEFAULT_OUTPUT_DIR,
-        "last_language": "eng"
+        "last_language": "eng",
+        "pre_prompt": "",
+        "post_prompt": ""
     }
     
     try:
@@ -549,6 +551,51 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
     except Exception as e:
         console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]")
 
+def get_available_models() -> List[str]:
+    """Get available models from Ollama"""
+    try:
+        import ollama
+        models = ollama.list()
+        return [m.get("name") for m in models.models] if hasattr(models, 'models') else [m.get("name") for m in models["models"]]
+    except Exception as e:
+        console.print(f"[yellow]Error fetching models: {str(e)}[/yellow]")
+        return []
+
+def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Display and handle the configuration menu"""
+    while True:
+        console.print("\n[bold cyan]Configuration Menu:[/bold cyan]")
+        console.print("  1. Set pre-prompt")
+        console.print("  2. Set post-prompt")
+        console.print("  3. View available models")
+        console.print("  4. Back to main menu")
+        
+        choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4"], default="4")
+        
+        if choice == "1":
+            config["pre_prompt"] = Prompt.ask("Enter pre-prompt", default=config.get("pre_prompt", ""))
+            save_config(config)
+            console.print("[green]Pre-prompt updated.[/green]")
+        
+        elif choice == "2":
+            config["post_prompt"] = Prompt.ask("Enter post-prompt", default=config.get("post_prompt", ""))
+            save_config(config)
+            console.print("[green]Post-prompt updated.[/green]")
+        
+        elif choice == "3":
+            models = get_available_models()
+            if models:
+                console.print("[blue]Available models:[/blue]")
+                for model in models:
+                    console.print(f"  - {model}")
+            else:
+                console.print("[red]No models available or Ollama not reachable.[/red]")
+        
+        elif choice == "4":
+            break
+    
+    return config
+
 async def main():
     """Main application flow"""
     try:
@@ -564,7 +611,7 @@ async def main():
             console.print("\n[bold cyan]Menu Options:[/bold cyan]")
             console.print("  1. Select directory with images")
             console.print("  2. Process all images in directory")
-            console.print("  3. Change OCR language")
+            console.print("  3. Configuration")
             console.print("  4. Exit")
             
             console.print(f"\n[blue]Current directory:[/blue] {current_directory}")
@@ -608,25 +655,7 @@ async def main():
                 await analyze_with_ollama(results_file, output_dir)
             
             elif choice == "3":
-                console.print("\n[bold]Change OCR Language[/bold]")
-                console.print("[blue]Common language codes:[/blue]")
-                console.print("eng = English")
-                console.print("fra = French")
-                console.print("deu = German")
-                console.print("spa = Spanish")
-                console.print("chi_sim = Chinese Simplified")
-                console.print("jpn = Japanese")
-                console.print("rus = Russian")
-                console.print("ara = Arabic")
-                console.print("Use '+' to combine multiple languages (e.g., 'eng+spa')")
-                
-                new_lang = Prompt.ask("Enter OCR language code", default=lang)
-                lang = new_lang
-                
-                config["last_language"] = lang
-                save_config(config)
-                
-                console.print(f"[green]OCR language set to: {lang}[/green]")
+                config = config_menu(config)
             
             elif choice == "4":
                 console.print("[cyan]Exiting application.[/cyan]")
