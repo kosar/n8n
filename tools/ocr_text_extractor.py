@@ -62,7 +62,7 @@ def load_config() -> Dict[str, Any]:
         "last_directory": os.getcwd(),
         "output_directory": DEFAULT_OUTPUT_DIR,
         "last_language": "eng",
-        "selected_model": "llava:latest"
+        "selected_model": "yarn-llama2"
     }
     
     try:
@@ -115,7 +115,7 @@ def check_ollama_status() -> bool:
     try:
         import ollama
         config = load_config()
-        selected_model = config.get("selected_model", "llava:latest")
+        selected_model = config.get("selected_model", "yarn-llama2:latest")
         
         models = get_available_models()
         if models:
@@ -206,7 +206,7 @@ async def clean_text_with_ollama(text: str) -> str:
         prompt = f"Correct and clean the following OCR text and do not provide any preamble in your response, only the cleaned up text.:\n\n{text}\n\nCleaned Text:"
 
         response = ollama.chat(
-            model="llava:latest",
+            model="yarn-llama2",
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.1}
         )
@@ -285,19 +285,24 @@ async def process_images(file_paths: List[str], lang: str = "eng") -> List[Dict[
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(complete_style="cyan", finished_style="green"),
-        TextColumn("[cyan]{task.fields[status]}"),
+        TextColumn("[cyan]{task.percentage:>3.0f}%"),
         TimeElapsedColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         console=console
     ) as progress:
-        main_task = progress.add_task(f"[cyan]Processing {len(file_paths)} images...", total=len(file_paths), status="")
+        main_task = progress.add_task(f"[cyan]Processing {len(file_paths)} images...", total=len(file_paths))
         
         for file_path in file_paths:
             filename = os.path.basename(file_path)
-            progress.update(main_task, description=f"[cyan]Processing {filename}...", status="")
+            progress.update(main_task, description=f"[cyan]Processing {filename}...")
+            
+            # Add subtasks for better tracking
+            ocr_task = progress.add_task(f"[blue]  OCR: {filename}", total=1, visible=True)
             
             try:
+                progress.update(ocr_task, description=f"[blue]  OCR: Extracting text from {filename}...")
                 ocr_text = await extract_text_from_image(file_path, lang)
+                progress.update(ocr_task, completed=1, description=f"[green]  OCR: Completed {filename}")
+                
                 metadata = get_image_metadata(file_path)
                 
                 result = {
@@ -309,17 +314,18 @@ async def process_images(file_paths: List[str], lang: str = "eng") -> List[Dict[
                 }
                 
                 results.append(result)
-                progress.update(main_task, advance=1, status="Complete")
+                progress.update(main_task, advance=1)
                 
             except Exception as e:
                 console.print(f"[bold red]Error processing {filename}: {str(e)}[/bold red]")
+                progress.update(ocr_task, visible=False)
                 results.append({
                     "filename": filename,
                     "file_path": file_path,
                     "error": str(e),
                     "processed_at": datetime.now().isoformat()
                 })
-                progress.update(main_task, advance=1, status="Error")
+                progress.update(main_task, advance=1)
     
     return results
 
@@ -536,18 +542,43 @@ def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
     """Display and handle the configuration menu"""
     while True:
         console.print("\n[bold cyan]Configuration Menu:[/bold cyan]")
-        console.print("  1. View full prompt")
-        console.print("  2. View available models")
-        console.print("  3. Select model")
-        console.print("  4. Back to main menu")
+        console.print("  1. Select input directory")
+        console.print("  2. Change output directory")
+        console.print("  3. View full prompt")
+        console.print("  4. View available models")
+        console.print("  5. Select model")
+        console.print("  6. Back to main menu")
         
-        choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4"], default="4")
+        choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4", "5", "6"], default="6")
         
         if choice == "1":
+            prev_dir = config.get("last_directory", os.getcwd())
+            new_dir = select_directory()
+            if prev_dir != new_dir:
+                config["last_directory"] = new_dir
+                save_config(config)
+        
+        elif choice == "2":
+            prev_output_dir = config.get("output_directory", DEFAULT_OUTPUT_DIR)
+            console.print(f"[cyan]Current output directory: {prev_output_dir}[/cyan]")
+            console.print("[yellow]Enter new output directory path (or leave empty to keep current):[/yellow]")
+            new_output_dir = input("> ").strip()
+            
+            if new_output_dir:
+                new_output_dir = os.path.expanduser(new_output_dir)
+                try:
+                    os.makedirs(new_output_dir, exist_ok=True)
+                    config["output_directory"] = new_output_dir
+                    save_config(config)
+                    console.print(f"[green]Output directory updated to: {new_output_dir}[/green]")
+                except Exception as e:
+                    console.print(f"[red]Error creating directory: {str(e)}[/red]")
+        
+        elif choice == "3":
             display_full_prompt()
             console.print("[blue]Note: Custom prompt extensions should be placed in 'postprompt.txt' in the application folder.[/blue]")
         
-        elif choice == "2":
+        elif choice == "4":
             models = get_available_models()
             if models:
                 console.print("[blue]Available models:[/blue]")
@@ -556,20 +587,20 @@ def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 console.print("[red]No models available or Ollama not reachable.[/red]")
         
-        elif choice == "3":
+        elif choice == "5":
             models = get_available_models()
             if models:
                 console.print("[blue]Available models:[/blue]")
                 for model in models:
                     console.print(f"  - {model}")
-                selected_model = Prompt.ask("Enter the model name to select", choices=models, default=config.get("selected_model", "llava:latest"))
+                selected_model = Prompt.ask("Enter the model name to select", choices=models, default=config.get("selected_model", "yarn-llama2"))
                 config["selected_model"] = selected_model
                 save_config(config)
                 console.print(f"[green]Model updated to {selected_model}.[/green]")
             else:
                 console.print("[red]No models available or Ollama not reachable.[/red]")
         
-        elif choice == "4":
+        elif choice == "6":
             break
     
     return config
@@ -578,6 +609,8 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
     """Analyze OCR results with Ollama using the selected model"""
     try:
         import ollama
+        import aiohttp
+        import json
 
         console.print("[cyan]Connecting to Ollama server...[/cyan]")
 
@@ -586,100 +619,188 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
             results = data.get("results", [])
 
         file_paths = [result.get("file_path") for result in results if "file_path" in result]
-        image_map = copy_images_to_output(file_paths, output_dir)
-
-        markdown_path = await create_markdown_summary(results, results_file, image_map)
-        console.print(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
-
-        # Read postprompt.txt if it exists
-        post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
-        post_prompt = ""
-        if os.path.exists(post_prompt_file):
-            try:
-                with open(post_prompt_file, 'r', encoding='utf-8') as f:
-                    post_prompt = f.read()
-                console.print(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
-        else:
-            console.print(f"[yellow]Note: 'postprompt.txt' not found. Using default prompt only.[/yellow]")
-
-        # Generate the prompt with simplified data and post-prompt
-        simplified_data = []
-        for result in results:
-            simplified_entry = {
-                "filename": result.get("filename", "unknown"),
-                "text": result.get("text", ""),
-            }
-            if "date" in result:
-                simplified_entry["date"] = result["date"]
-            if "sender" in result:
-                simplified_entry["sender"] = result["sender"]
-            simplified_data.append(simplified_entry)
-
-        prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
-        prompt += json.dumps(simplified_data, indent=2)
         
-        if post_prompt:
-            prompt += "\n\n" + post_prompt
-
-        config = load_config()
-        model_name = config.get("selected_model", "llava:latest")
-
-        console.print(f"[cyan]Checking Ollama model: {model_name}[/cyan]")
-        try:
-            models = ollama.list()
-            model_names = [m.model for m in models if hasattr(m, 'model')]
-
-            if model_name not in model_names:
-                console.print(f"[yellow]Model {model_name} not found. Pulling from repository...[/yellow]")
-                ollama.pull(model_name)
-        except Exception as e:
-            console.print(f"[yellow]Error checking models, will try to use {model_name} directly: {str(e)}[/yellow]")
-
-        console.print(f"[cyan]Analyzing text with {model_name}...[/cyan]")
-        start_time = time.time()
-
+        # Create progress display for multiple steps
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(complete_style="cyan", finished_style="green"),
-            TextColumn("[cyan]{task.fields[status]}"),
             TimeElapsedColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             console=console
         ) as progress:
-            analysis_task = progress.add_task(f"[cyan]Analyzing text with {model_name}...", total=100, status="")
+            # Step 1: Create summary and copy images
+            copy_task = progress.add_task("[cyan]Creating output resources...", total=2)
+            
+            progress.update(copy_task, description="[cyan]Copying images to output directory...")
+            image_map = copy_images_to_output(file_paths, output_dir)
+            progress.update(copy_task, advance=1)
 
-            response = ollama.chat(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                options={
-                    "temperature": 0.2,
-                    "num_predict": 4096
+            progress.update(copy_task, description="[cyan]Creating markdown summary...")
+            markdown_path = await create_markdown_summary(results, results_file, image_map)
+            progress.update(copy_task, advance=1, description="[green]Resources created")
+            console.print(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
+
+            # Step 2: Prepare the prompt
+            prompt_task = progress.add_task("[cyan]Building analysis prompt...", total=1)
+            
+            # Read postprompt.txt if it exists
+            post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+            post_prompt = ""
+            has_custom_prompt = False
+            if os.path.exists(post_prompt_file):
+                try:
+                    with open(post_prompt_file, 'r', encoding='utf-8') as f:
+                        post_prompt = f.read()
+                    if post_prompt.strip():
+                        has_custom_prompt = True
+                        console.print(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
+            else:
+                console.print(f"[blue]Using default prompt only (no postprompt.txt found)[/blue]")
+
+            # Generate the prompt with simplified data and post-prompt
+            simplified_data = []
+            for result in results:
+                simplified_entry = {
+                    "filename": result.get("filename", "unknown"),
+                    "text": result.get("text", ""),
                 }
+                if "date" in result:
+                    simplified_entry["date"] = result["date"]
+                if "sender" in result:
+                    simplified_entry["sender"] = result["sender"]
+                simplified_data.append(simplified_entry)
+
+            prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
+            prompt += json.dumps(simplified_data, indent=2)
+            
+            if post_prompt:
+                prompt += "\n\n" + post_prompt
+            
+            progress.update(prompt_task, completed=1, description="[green]Prompt prepared")
+            
+            # Step 3: Set up the model
+            config = load_config()
+            model_name = config.get("selected_model", "yarn-llama2")
+            model_task = progress.add_task(f"[cyan]Setting up model: {model_name}...", total=1)
+
+            try:
+                models = ollama.list()
+                model_names = [m.model for m in models if hasattr(m, 'model')]
+
+                if model_name not in model_names:
+                    progress.update(model_task, description=f"[yellow]Pulling {model_name}...")
+                    ollama.pull(model_name)
+                progress.update(model_task, completed=1, description=f"[green]Model {model_name} ready")
+            except Exception as e:
+                console.print(f"[yellow]Error checking models, will try to use {model_name} directly: {str(e)}[/yellow]")
+                progress.update(model_task, completed=1, description=f"[yellow]Model status unknown")
+
+            # Step 4: Monitor the Ollama server in a separate task
+            monitor_task = progress.add_task("[cyan]Monitoring Ollama...", total=None)
+            
+            # Start a separate task to monitor Ollama status
+            monitor_stop_event = asyncio.Event()
+            monitoring_task = asyncio.create_task(
+                monitor_ollama_status(monitor_task, progress, monitor_stop_event)
             )
 
-            analysis = response.message.content if hasattr(response, 'message') and hasattr(response.message, 'content') else response["message"]["content"]
-            progress.update(analysis_task, advance=100, status="Complete")
+            # Step 5: Run the analysis
+            console.print(f"[cyan]Analyzing text with {model_name}...[/cyan]")
+            start_time = time.time()
+            analysis_task = progress.add_task(f"[cyan]Analyzing with {model_name}...", total=100)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
+            # Try to use streaming if available
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        'http://localhost:11434/api/generate',
+                        json={
+                            'model': model_name,
+                            'prompt': prompt,
+                            'stream': True,
+                            'options': {
+                                'temperature': 0.2,
+                                'num_predict': 4096
+                            }
+                        },
+                        timeout=aiohttp.ClientTimeout(total=1200)  # 20 minute timeout
+                    ) as response:
+                        if response.status != 200:
+                            # Fallback to non-streaming approach if streaming fails
+                            raise ValueError("Streaming not supported or failed")
+                            
+                        analysis = ""
+                        tokens = 0
+                        start_time = time.time()
+                        
+                        async for line in response.content:
+                            if line:
+                                try:
+                                    data = json.loads(line)
+                                    if 'response' in data:
+                                        analysis += data['response']
+                                        tokens += 1
+                                        
+                                        # Update progress every few tokens
+                                        if tokens % 10 == 0:
+                                            elapsed = time.time() - start_time
+                                            rate = tokens / elapsed if elapsed > 0 else 0
+                                            remaining = int(4000 / rate) - int(elapsed) if rate > 0 else "?"
+                                            progress.update(
+                                                analysis_task, 
+                                                description=f"[cyan]Generated {tokens} tokens ({rate:.1f}/sec)",
+                                                completed=min(100, tokens * 100 // 4000)
+                                            )
+                                    
+                                    if 'done' in data and data['done']:
+                                        progress.update(analysis_task, completed=100, description=f"[green]Analysis complete ({tokens} tokens)")
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    pass
+                            
+            except Exception as e:
+                console.print(f"[yellow]Streaming error: {e}. Falling back to standard API.[/yellow]")
+                # Fallback to standard API
+                response = ollama.chat(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={
+                        "temperature": 0.2,
+                        "num_predict": 4096
+                    }
+                )
+                analysis = response.message.content if hasattr(response, 'message') and hasattr(response.message, 'content') else response["message"]["content"]
+                progress.update(analysis_task, completed=100, description="[green]Analysis complete")
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("# Message Timeline Analysis\n\n")
-            f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} using {model_name}*\n\n")
-            f.write(analysis)
-            f.write("\n\n## Source Material\n\n")
-            f.write(f"- [Raw OCR Data]({os.path.basename(results_file)})\n")
-            f.write(f"- [Basic OCR Summary]({os.path.basename(markdown_path)})\n\n")
+            # Stop the monitoring task
+            monitor_stop_event.set()
+            await monitoring_task
 
-            if image_map:
-                f.write("\n## Original Images\n\n")
-                for i, (original_path, copied_path) in enumerate(image_map.items(), 1):
-                    filename = os.path.basename(original_path)
-                    f.write(f"### Image {i}: {filename}\n\n")
-                    f.write(f"![Screenshot]({copied_path})\n\n")
+            # Step 6: Save the results
+            save_task = progress.add_task("[cyan]Saving analysis results...", total=1)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
+
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write("# Message Timeline Analysis\n\n")
+                f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} using {model_name}*\n\n")
+                f.write(analysis)
+                f.write("\n\n## Source Material\n\n")
+                f.write(f"- [Raw OCR Data]({os.path.basename(results_file)})\n")
+                f.write(f"- [Basic OCR Summary]({os.path.basename(markdown_path)})\n\n")
+
+                if image_map:
+                    f.write("\n## Original Images\n\n")
+                    for i, (original_path, copied_path) in enumerate(image_map.items(), 1):
+                        filename = os.path.basename(original_path)
+                        f.write(f"### Image {i}: {filename}\n\n")
+                        f.write(f"![Screenshot]({copied_path})\n\n")
+                        
+            progress.update(save_task, completed=1, description="[green]Results saved")
 
         elapsed_time = time.time() - start_time
         console.print(f"[green]✓ Analysis completed in {elapsed_time:.2f} seconds[/green]")
@@ -688,9 +809,64 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
         os.system(f'open "{output_path}"')
 
     except ImportError:
-        console.print("[red]Ollama package not installed. Install with: pip install ollama[/red]")
+        console.print("[red]Required packages not installed. Install with: pip install ollama aiohttp[/red]")
     except Exception as e:
         console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]")
+        import traceback
+        console.print(traceback.format_exc())
+
+async def monitor_ollama_status(task_id, progress, stop_event):
+    """Monitor the Ollama server status"""
+    try:
+        import psutil
+        import aiohttp
+        
+        while not stop_event.is_set():
+            stats = {}
+            
+            # Get process info
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+                    if 'ollama' in proc.info['name'].lower():
+                        # Update CPU usage before reading
+                        proc.cpu_percent()
+                        # Wait a moment and read again for better accuracy
+                        await asyncio.sleep(0.5)
+                        stats["CPU"] = f"{proc.cpu_percent():.1f}%"
+                        stats["Memory"] = f"{proc.info['memory_info'].rss / (1024 * 1024):.1f} MB"
+                        break
+            except Exception:
+                pass
+                
+            # Try metrics endpoint
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get('http://localhost:11434/api/metrics', timeout=1) as response:
+                        if response.status == 200:
+                            text = await response.text()
+                            if "ollama_requests_total" in text:
+                                stats["API"] = "Active"
+            except Exception:
+                pass
+                
+            # Update progress display
+            if stats:
+                status_text = " | ".join([f"{k}: {v}" for k, v in stats.items()])
+                progress.update(task_id, description=f"[cyan]Ollama Status: {status_text}")
+            else:
+                progress.update(task_id, description="[yellow]Ollama Status: Monitoring...")
+            
+            # Check stop event with a timeout
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+            
+    except Exception as e:
+        progress.update(task_id, description=f"[red]Monitor error: {str(e)}")
+    finally:
+        # Hide the task when done
+        progress.update(task_id, visible=False)
 
 def get_available_models() -> List[str]:
     """Get available models from Ollama"""
@@ -710,6 +886,58 @@ def get_available_models() -> List[str]:
         console.print(f"[yellow]Error fetching models: {str(e)}[/yellow]")
         return []
 
+def show_configuration_status(config: Dict[str, Any]) -> None:
+    """Display the current configuration status"""
+    config_table = Table(title="Current Configuration", box=None, padding=(0, 1))
+    
+    config_table.add_column("Setting", style="cyan")
+    config_table.add_column("Value", style="green")
+    config_table.add_column("Status", style="yellow")
+    
+    # Input directory
+    input_dir = config.get("last_directory", os.getcwd())
+    file_count = len(get_all_images_in_directory(input_dir))
+    input_status = f"{file_count} images found" if file_count > 0 else "No images found"
+    config_table.add_row("Input directory", input_dir, input_status)
+    
+    # Output directory
+    output_dir = config.get("output_directory", DEFAULT_OUTPUT_DIR)
+    output_status = "Ready" if os.path.isdir(output_dir) else "Will be created"
+    config_table.add_row("Output directory", output_dir, output_status)
+    
+    # Model
+    model = config.get("selected_model", "yarn-llama2")
+    model_status = ""
+    try:
+        import ollama
+        models = get_available_models()
+        if model in models:
+            model_status = "Available"
+        else:
+            model_status = "Not installed (will be pulled)"
+    except:
+        model_status = "Ollama status unknown"
+    config_table.add_row("Selected model", model, model_status)
+    
+    # OCR language
+    lang = config.get("last_language", "eng")
+    config_table.add_row("OCR language", lang, "")
+    
+    # Custom prompt
+    post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+    if os.path.exists(post_prompt_file):
+        try:
+            with open(post_prompt_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                status = "Custom prompt loaded" if content.strip() else "Empty file"
+        except:
+            status = "Error reading file"
+    else:
+        status = "No custom prompt"
+    config_table.add_row("Custom prompt", post_prompt_file, status)
+    
+    console.print(config_table)
+
 async def main():
     """Main application flow"""
     try:
@@ -724,25 +952,16 @@ async def main():
         
         while True:
             console.print("\n[bold cyan]Menu Options:[/bold cyan]")
-            console.print("  1. Select directory with images")
-            console.print("  2. Process all images in directory")
-            console.print("  3. Configuration")
-            console.print("  4. Exit")
+            console.print("  1. Process all images in directory")
+            console.print("  2. Configuration")
+            console.print("  3. Exit")
             
-            console.print(f"\n[blue]Current directory:[/blue] {current_directory}")
-            console.print(f"[blue]Output directory:[/blue] {output_dir}")
-            console.print(f"[blue]OCR language:[/blue] {lang}")
+            # Show current configuration status
+            show_configuration_status(config)
             
-            choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3", "4"], default="1")
+            choice = Prompt.ask("\nChoose an option", choices=["1", "2", "3"], default="1")
             
             if choice == "1":
-                prev_dir = current_directory
-                current_directory = select_directory()
-                if prev_dir != current_directory:
-                    config["last_directory"] = current_directory
-                    save_config(config)
-            
-            elif choice == "2":
                 console.print(f"\n[bold]Processing images in: {current_directory}[/bold]")
                 
                 if not os.path.isdir(current_directory):
@@ -754,7 +973,23 @@ async def main():
                     console.print("[yellow]No supported image files found in this directory.[/yellow]")
                     continue
                 
-                console.print(f"[green]Found {len(file_paths)} image files.[/green]")
+                # Show processing details
+                model_name = config.get("selected_model", "yarn-llama2")
+                post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+                has_custom_prompt = os.path.exists(post_prompt_file) and os.path.getsize(post_prompt_file) > 0
+                
+                console.print(Panel.fit(
+                    f"[bold green]Ready to process {len(file_paths)} images[/bold green]\n"
+                    f"Using model: [cyan]{model_name}[/cyan]\n"
+                    f"Custom prompt: {'[green]Yes[/green]' if has_custom_prompt else '[yellow]No[/yellow]'}\n"
+                    f"Output directory: [blue]{output_dir}[/blue]",
+                    title="Processing Summary",
+                    border_style="green"
+                ))
+                
+                if not Confirm.ask("Continue with processing?", default=True):
+                    console.print("[yellow]Processing cancelled.[/yellow]")
+                    continue
                 
                 results = await process_images(file_paths, lang)
                 
@@ -769,10 +1004,12 @@ async def main():
                 
                 await analyze_with_ollama(results_file, output_dir)
             
-            elif choice == "3":
+            elif choice == "2":
                 config = config_menu(config)
+                current_directory = config.get("last_directory", os.getcwd())
+                output_dir = config.get("output_directory", DEFAULT_OUTPUT_DIR)
             
-            elif choice == "4":
+            elif choice == "3":
                 console.print("[cyan]Exiting application.[/cyan]")
                 
                 config["last_directory"] = current_directory
@@ -782,7 +1019,7 @@ async def main():
                 
                 return
                 
-            if choice != "4":
+            if choice != "3":
                 console.print("\nPress Enter to continue...")
                 try:
                     input()
