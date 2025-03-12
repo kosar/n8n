@@ -4,3 +4,4 @@ test_content/
 .DS_Store
 node_modules
 documentation/
+postprompt.txt
