@@ -23,6 +23,7 @@ from rich.live import Live
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, BarColumn
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
+from rich.text import Text  # Add this import
 
 # Constants
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.JPG', '.PNG', '.JPEG', '.TIFF', '.pdf', '.PDF'}
@@ -221,7 +222,7 @@ async def extract_text_from_image(image_path: str, lang: str = "eng", progress: 
         return f"ERROR: {str(e)}"
 
 async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None, task_id: Optional[int] = None) -> str:
-    """Clean the OCR text using Ollama."""
+    """Clean the OCR text using Ollama with better error reporting"""
     try:
         import ollama
     except ImportError:
@@ -233,214 +234,308 @@ async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None,
         model_name = config.get("selected_model", "yarn-llama2")
         
         if progress:
-            progress.update(task_id, description=f"[magenta]Ollama: Cleaning text using {model_name}...")
+            progress.update(task_id, description=f"[magenta]Ollama: Preparing to clean text...")
         
-        prompt = f"Correct and clean the following OCR text and do not provide any preamble in your response, only the cleaned up text.:\n\n{text}\n\nCleaned Text:"
+        prompt = f"You are a helpful assistant. Clean up this OCR text:\n\n{text}\n\nCleaned text:"
         
-        # Create a monitoring task for this operation
-        monitor_stop_event = None
-        monitoring_task = None
-        
-        if progress:
-            monitor_task_id = progress.add_task(f"[cyan]Monitoring Ollama...", total=None, visible=True)
-            monitor_stop_event = asyncio.Event()
-            monitoring_task = asyncio.create_task(
-                monitor_ollama_status(monitor_task_id, progress, monitor_stop_event)
-            )
-        
+        # Add timeout handling
         try:
-            # Try streaming approach first for better monitoring
-            cleaned_text = await stream_ollama_completion(
-                model_name, 
-                prompt, 
-                temperature=0.1, 
-                progress=progress, 
-                task_id=task_id
+            start_time = time.time()
+            cleaned_text = await asyncio.wait_for(
+                stream_ollama_completion(
+                    model_name, 
+                    prompt, 
+                    temperature=0.1,
+                    progress=progress,
+                    task_id=task_id
+                ),
+                timeout=60  # 60 second timeout
             )
+            return cleaned_text
+            
+        except asyncio.TimeoutError:
+            if progress:
+                progress.update(task_id, description=f"[red]Ollama: Timed out after 60s, using original text")
+            return text
+            
         except Exception as e:
-            console.print(f"[yellow]Streaming approach failed: {str(e)}. Falling back to standard API.[/yellow]")
-            # Fallback to standard API with proper error handling
-            try:
-                response = ollama.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={"temperature": 0.1}
-                )
-                # Handle both possible response formats
-                if hasattr(response, 'message') and hasattr(response.message, 'content'):
-                    cleaned_text = response.message.content
-                elif isinstance(response, dict) and "message" in response:
-                    if isinstance(response["message"], dict) and "content" in response["message"]:
-                        cleaned_text = response["message"]["content"]
-                    else:
-                        console.print("[yellow]Unexpected response format from Ollama. Using original text.[/yellow]")
-                        cleaned_text = text
-                else:
-                    console.print("[yellow]Unexpected response format from Ollama. Using original text.[/yellow]")
-                    cleaned_text = text
-            except Exception as inner_e:
-                console.print(f"[yellow]Standard API also failed: {str(inner_e)}. Using original text.[/yellow]")
-                cleaned_text = text
-        finally:
-            # Stop monitoring if active
-            if monitor_stop_event:
-                monitor_stop_event.set()
-                if monitoring_task:
-                    try:
-                        await asyncio.wait_for(monitoring_task, timeout=5.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-                    except Exception as e:
-                        console.print(f"[yellow]Error stopping monitoring: {str(e)}[/yellow]")
-                
-                # Hide the monitoring task
-                if progress:
-                    progress.update(monitor_task_id, visible=False)
-                    
-        return cleaned_text
+            if progress:
+                progress.update(task_id, description=f"[red]Ollama error: {str(e)}, using original text")
+            return text
+            
     except Exception as e:
-        console.print(f"[yellow]Error cleaning text with Ollama: {str(e)}[/yellow]")
+        if progress:
+            progress.update(task_id, description=f"[red]Failed to clean text: {str(e)}")
         return text
 
 async def stream_ollama_completion(model: str, prompt: str, temperature: float = 0.2, progress: Optional[Progress] = None, task_id: Optional[int] = None) -> str:
-    """Stream a completion from Ollama with detailed status updates"""
+    """Stream a completion from Ollama with improved error handling"""
+    result = ""
+    tokens = 0
+    start_time = time.time()
+    last_update = start_time
+    
     try:
-        result = ""
-        tokens = 0
-        start_time = time.time()
-        
         async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    'http://localhost:11434/api/generate',
-                    json={
-                        'model': model,
-                        'prompt': prompt,
-                        'stream': True,
-                        'options': {
-                            'temperature': temperature
-                        }
-                    },
-                    timeout=aiohttp.ClientTimeout(total=300)  # 5 minute timeout
-                ) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        raise ValueError(f"Ollama API error: {response.status} - {error_text}")
-                        
-                    async for line in response.content:
-                        if line:
-                            try:
-                                data = json.loads(line)
+            if progress:
+                progress.update(task_id, description=f"[cyan]Connecting to Ollama...")
+                
+            async with session.post(
+                'http://localhost:11434/api/generate',
+                json={
+                    'model': model,
+                    'prompt': prompt,
+                    'stream': True,
+                    'options': {
+                        'temperature': temperature
+                    }
+                },
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as response:
+                
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise ValueError(f"Ollama API error {response.status}: {error_text}")
+                
+                if progress:
+                    progress.update(task_id, description=f"[cyan]Starting token generation...")
+                
+                async for line in response.content:
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            
+                            if 'response' in data:
+                                result += data['response']
+                                tokens += 1
                                 
-                                if 'response' in data:
-                                    result += data['response']
-                                    tokens += 1
-                                    
-                                    if progress and task_id and tokens % 5 == 0:
-                                        elapsed = time.time() - start_time
+                                # Update progress every second
+                                current_time = time.time()
+                                if current_time - last_update >= 1.0:
+                                    if progress and task_id:
+                                        elapsed = current_time - start_time
                                         rate = tokens / elapsed if elapsed > 0 else 0
                                         progress.update(
                                             task_id, 
-                                            description=f"[magenta]Ollama: Generated {tokens} tokens ({rate:.1f}/sec)"
+                                            description=f"[cyan]Tokens: {tokens} ({rate:.1f}/sec)"
                                         )
+                                    last_update = current_time
+                            
+                            if data.get('done', False):
+                                if progress and task_id:
+                                    elapsed = time.time() - start_time
+                                    rate = tokens / elapsed if elapsed > 0 else 0
+                                    progress.update(
+                                        task_id,
+                                        description=f"[green]Complete: {tokens} tokens in {elapsed:.1f}s ({rate:.1f}/sec)"
+                                    )
+                                break
                                 
-                                # Update with completion statistics when done
-                                if data.get('done', False):
-                                    if progress and task_id and 'total_duration' in data:
-                                        duration_sec = data['total_duration'] / 1_000_000_000  # ns to s
-                                        progress.update(
-                                            task_id,
-                                            description=f"[green]Ollama: Completed ({tokens} tokens, {duration_sec:.2f}s)"
-                                        )
-                                    break
-                                    
-                            except json.JSONDecodeError:
-                                pass
-            except aiohttp.ClientConnectorError as e:
-                raise ValueError(f"Could not connect to Ollama server: {str(e)}")
-        
-        return result
+                        except json.JSONDecodeError as e:
+                            if progress:
+                                progress.update(task_id, description=f"[yellow]Warning: Invalid JSON received")
+                            
+    except aiohttp.ClientConnectorError:
+        raise ConnectionError("Could not connect to Ollama server")
     except Exception as e:
-        raise ValueError(f"Error streaming from Ollama: {str(e)}")
+        raise RuntimeError(f"Ollama streaming error: {str(e)}")
+    
+    return result
+
+class StatusUpdate:
+    """Immutable status update message"""
+    def __init__(self, component: str, status: str):
+        self._component = component
+        self._status = status
+        self._timestamp = datetime.now()
+    
+    @property
+    def as_row(self) -> Tuple[str, str]:
+        return (self._component, self._status)
+
+class StatusManager:
+    """Thread-safe status manager using message queue"""
+    def __init__(self):
+        self._updates = asyncio.Queue()
+        self._current_status = []
+        self._lock = asyncio.Lock()
+    
+    async def update(self, component: str, status: str):
+        await self._updates.put(StatusUpdate(component, status))
+    
+    async def get_status_rows(self) -> List[Tuple[str, str]]:
+        async with self._lock:
+            while not self._updates.empty():
+                update = await self._updates.get()
+                # Replace existing status for component or add new
+                self._current_status = [s for s in self._current_status if s._component != update._component]
+                self._current_status.append(update)
+            return [s.as_row for s in self._current_status]
+
+def create_status_table() -> Table:
+    """Create a new status table with consistent structure"""
+    table = Table.grid()
+    table.add_column("Component", style="blue")
+    table.add_column("Status", style="green")
+    # Add default row to prevent empty table
+    table.add_row("Status", "Initializing...")
+    return table
+
+async def update_display(layout: Layout, status_manager: StatusManager, live: Live):
+    """Update display with current status continuously"""
+    while True:
+        try:
+            # Get latest status
+            rows = await status_manager.get_status_rows()
+            
+            # Create fresh table
+            status_table = create_status_table()
+            for component, status in rows:
+                status_table.add_row(component, status)
+                
+            # Update layout with new table
+            layout["status"].update(Panel(status_table, title="System Status", border_style="blue"))
+            live.refresh()
+            
+            # Wait before next update
+            await asyncio.sleep(0.5)  # Update every 500ms
+            
+        except Exception as e:
+            # Fallback to error display
+            error_table = create_status_table()
+            error_table.add_row("Error", f"Display update failed: {str(e)[:30]}")
+            layout["status"].update(Panel(error_table, title="System Status", border_style="red"))
 
 async def process_images(file_paths: List[str], lang: str = "eng") -> List[Dict[str, Any]]:
-    """Process images and extract OCR text with detailed status"""
+    """Process images with thread-safe status updates"""
     if not file_paths:
         console.print("[yellow]No files selected for processing.[/yellow]")
         return []
     
     results = []
+    status_manager = StatusManager()
     
-    # Create a layout for a more sophisticated display
+    # Create layout
     layout = Layout()
     layout.split(
-        Layout(name="main", ratio=3),
+        Layout(name="progress", ratio=2),
+        Layout(name="main", ratio=2),
         Layout(name="status", ratio=1)
     )
     
-    # Progress display for main tasks
-    main_progress = Progress(
+    # Initialize components
+    progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(complete_style="cyan", finished_style="green"),
-        TextColumn("[cyan]{task.percentage:>3.0f}%"),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TimeElapsedColumn(),
     )
+    detail_progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(complete_style="yellow", finished_style="green"),
+        TimeElapsedColumn(),
+    )
+    status_table = create_status_table()
     
-    # Status table to show system info
-    status_table = Table.grid()
-    status_table.add_column("Component", style="blue")
-    status_table.add_column("Status", style="green")
+    # Group progress displays
+    progress_group = Table.grid()
+    progress_group.add_row(Panel(progress, title="Overall Progress"))
+    progress_group.add_row(Panel(detail_progress, title="Current Task"))
     
-    # Initialize the status table with some values right away
-    update_status_table(status_table, results, file_paths)
-    
-    # Configure the layout
-    layout["main"].update(main_progress)
+    # Configure layout
+    layout["progress"].update(progress_group)
+    layout["main"].update(Panel(Text(), title="Debug Output"))
     layout["status"].update(Panel(status_table, title="System Status", border_style="blue"))
     
-    # Main task progress
-    with Live(layout, refresh_per_second=4) as live:
-        main_task = main_progress.add_task(f"[cyan]Processing {len(file_paths)} images...", total=len(file_paths))
-        
-        for file_path in file_paths:
-            filename = os.path.basename(file_path)
-            main_progress.update(main_task, description=f"[cyan]Processing {filename}...")
+    try:
+        with Live(layout, refresh_per_second=4) as live:
+            # Start display updater task with live context
+            display_task = asyncio.create_task(
+                update_display(layout, status_manager, live)
+            )
             
-            # Add subtasks for better tracking
-            ocr_task = main_progress.add_task(f"[blue]  OCR: {filename}", total=1, visible=True)
+            # Initial status
+            await status_manager.update("Status", "Starting processing...")
             
+            # Process files
+            main_task = progress.add_task(
+                f"[cyan]Processing {len(file_paths)} images...", 
+                total=len(file_paths)
+            )
+            
+            debug_messages = []
+            
+            def add_debug(msg: str):
+                # Strip color markup before adding timestamp
+                plain_msg = Text.from_markup(msg).plain
+                debug_messages.append(f"{datetime.now().strftime('%H:%M:%S')} {plain_msg}")
+                layout["main"].update(Panel(Text("\n".join(debug_messages[-10:])), title="Debug Output"))
+                live.refresh()
+            
+            add_debug("[cyan]Starting processing...[/cyan]")
+            
+            for file_path in file_paths:
+                filename = os.path.basename(file_path)
+                add_debug(f"[blue]Processing {filename}...[/blue]")
+                
+                # Add subtasks for better tracking
+                ocr_task = detail_progress.add_task(
+                    f"[blue]OCR: {filename}", 
+                    total=1,
+                    start=False
+                )
+                
+                try:
+                    detail_progress.start_task(ocr_task)
+                    ocr_text = await extract_text_from_image(file_path, lang, detail_progress, ocr_task)
+                    
+                    if "ERROR:" in ocr_text:
+                        add_debug(f"[red]OCR failed for {filename}: {ocr_text}[/red]")
+                    else:
+                        add_debug(f"[green]OCR completed for {filename}[/green]")
+                    
+                    detail_progress.update(ocr_task, completed=1)
+                    
+                    metadata = get_image_metadata(file_path)
+                    result = {
+                        "filename": filename,
+                        "file_path": file_path,
+                        "metadata": metadata,
+                        "text": ocr_text,
+                        "processed_at": datetime.now().isoformat()
+                    }
+                    results.append(result)
+                    
+                    # Update status via manager
+                    await status_manager.update("Processing", f"Processing {os.path.basename(file_path)}")
+                    await status_manager.update("Progress", f"Completed {len(results)}/{len(file_paths)}")
+                    
+                except Exception as e:
+                    error_msg = f"Error processing {filename}: {str(e)}"
+                    add_debug(f"[red]{error_msg}[/red]")
+                    results.append({
+                        "filename": filename,
+                        "file_path": file_path,
+                        "error": str(e),
+                        "processed_at": datetime.now().isoformat()
+                    })
+                    await status_manager.update("Error", f"Failed: {str(e)[:30]}")
+                
+                progress.advance(main_task)
+            
+            add_debug("[green]Processing complete![/green]")
+            
+            # Clean up display task
+            display_task.cancel()
             try:
-                ocr_text = await extract_text_from_image(file_path, lang, main_progress, ocr_task)
-                main_progress.update(ocr_task, completed=1, description=f"[green]  OCR: Completed {filename}")
-                
-                metadata = get_image_metadata(file_path)
-                
-                result = {
-                    "filename": filename,
-                    "file_path": file_path,
-                    "metadata": metadata,
-                    "text": ocr_text,
-                    "processed_at": datetime.now().isoformat()
-                }
-                
-                results.append(result)
-                main_progress.update(main_task, advance=1)
-                
-            except Exception as e:
-                console.print(f"[bold red]Error processing {filename}: {str(e)}[/bold red]")
-                main_progress.update(ocr_task, visible=False)
-                results.append({
-                    "filename": filename,
-                    "file_path": file_path,
-                    "error": str(e),
-                    "processed_at": datetime.now().isoformat()
-                })
-                main_progress.update(main_task, advance=1)
+                await asyncio.wait_for(display_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
             
-            # Update status table after each file - passing needed parameters
-            update_status_table(status_table, results, file_paths)
-            live.refresh()
+    except Exception as e:
+        console.print(f"[bold red]Display error: {str(e)}[/bold red]")
+        console.print(traceback.format_exc())
     
     return results
 
@@ -691,17 +786,19 @@ async def analyze_with_ollama(results_file: str, output_dir: str):
                 tokens = 0
                 
                 async with aiohttp.ClientSession() as session:
+                    data = {
+                        'model': model_name,
+                        'prompt': prompt,
+                        'stream': True,
+                        'options': {
+                            'temperature': 0.2,
+                            'num_predict': 4096
+                        }
+                    }
+                    console.print(f"[blue]Sending to Ollama: {data}[/blue]")
                     async with session.post(
                         'http://localhost:11434/api/generate',
-                        json={
-                            'model': model_name,
-                            'prompt': prompt,
-                            'stream': True,
-                            'options': {
-                                'temperature': 0.2,
-                                'num_predict': 4096
-                            }
-                        },
+                        json=data,
                         timeout=aiohttp.ClientTimeout(total=1800)  # 30 minute timeout
                     ) as response:
                         if response.status != 200:
@@ -1448,53 +1545,7 @@ def show_configuration_status(config: Dict[str, Any]) -> None:
     
     console.print(config_table)
 
-def update_status_table(status_table, results, file_paths):
-    """Update the status table with current system info"""
-    # Clear the table
-    status_table.rows = []
-    
-    # Add CPU and RAM information
-    try:
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        memory = psutil.virtual_memory()
-        status_table.add_row("CPU Usage", f"{cpu_percent}%")
-        status_table.add_row("Memory Usage", f"{memory.percent}% ({memory.used // (1024*1024)} MB / {memory.total // (1024*1024)} MB)")
-    except Exception as e:
-        status_table.add_row("System Stats", f"Error: {str(e)[:30]}")
-    
-    # Add Ollama process info if running
-    try:
-        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
-            proc_info = proc.info
-            if 'name' in proc_info and proc_info['name'] and 'ollama' in proc_info['name'].lower():
-                # Try to get accurate CPU usage
-                proc.cpu_percent()
-                time.sleep(0.1)  # Brief pause for CPU usage calculation to update
-                current_cpu = proc.cpu_percent()
-                
-                if 'memory_info' in proc_info and proc_info['memory_info']:
-                    status_table.add_row("Ollama CPU", f"{current_cpu:.1f}%")
-                    status_table.add_row("Ollama Memory", f"{proc_info['memory_info'].rss / (1024 * 1024):.1f} MB")
-                    break
-    except Exception as e:
-        status_table.add_row("Ollama Status", f"Error: {str(e)[:30]}")
-    
-    # Add file processing stats
-    try:
-        processed_count = len([r for r in results if 'error' not in r])
-        error_count = len([r for r in results if 'error' in r])
-        status_table.add_row("Files Processed", f"{processed_count}/{len(file_paths)}")
-        if error_count > 0:
-            status_table.add_row("Errors", f"{error_count}", style="red")
-    except Exception as e:
-        status_table.add_row("Processing", f"Error: {str(e)[:30]}")
-    
-    # Always add a minimum status even if empty
-    if len(status_table.rows) == 0:
-        status_table.add_row("Status", "Initializing...")
-
 async def main():
-    """Main application flow"""
     try:
         console.print(banner())
         check_tesseract_installation()
