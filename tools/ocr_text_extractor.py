@@ -264,7 +264,13 @@ def preprocess_image(image_path: str) -> np.ndarray:
     adaptive_thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
     return adaptive_thresh
 
-async def extract_text_from_image(image_path: str, lang: str = "eng", progress: Optional[Progress] = None, task_id: Optional[int] = None) -> str:
+async def extract_text_from_image(
+    image_path: str, 
+    lang: str = "eng", 
+    progress: Optional[Progress] = None, 
+    task_id: Optional[int] = None,
+    display_manager: Optional["DisplayManager"] = None
+) -> str:
     """Extract text from image using OCR"""
     try:
         if progress:
@@ -297,7 +303,7 @@ async def extract_text_from_image(image_path: str, lang: str = "eng", progress: 
         # Post-process and clean with Ollama
         if progress:
             progress.update(task_id, description=f"[blue]Cleaning text with Ollama...")
-        cleaned_text = await clean_text_with_ollama(combined_text, progress, task_id)
+        cleaned_text = await clean_text_with_ollama(combined_text, progress, task_id, display_manager)
 
         if progress:
             progress.update(task_id, description=f"[blue]Post-processing text...")
@@ -517,7 +523,11 @@ async def process_images(file_paths: List[str], lang: str = "eng",
             try:
                 display_manager.detail_progress.start_task(ocr_task)
                 ocr_text = await extract_text_from_image(
-                    file_path, lang, display_manager.detail_progress, ocr_task
+                    file_path, 
+                    lang, 
+                    display_manager.detail_progress, 
+                    ocr_task,
+                    display_manager
                 )
                 
                 if "ERROR:" in ocr_text:
@@ -808,7 +818,7 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
             try:
                 with open(post_prompt_file, 'r', encoding='utf-8') as f:
                     post_prompt = f.read()
-                if post_prompt.strip():
+                if (post_prompt.strip()):
                     has_custom_prompt = True
                     display_manager.add_debug(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
             except Exception as e:
