@@ -386,7 +386,7 @@ class DisplayManager:
         self.layout = Layout()
         self.layout.split(
             Layout(name="progress", ratio=1),
-            Layout(name="main", ratio=1)
+            Layout(name="main", ratio=2)  # Increased ratio for more debug space
         )
         
         # Progress tracking components
@@ -455,7 +455,6 @@ class DisplayManager:
         """Log status changes to debug output instead of using a separate status display"""
         self.add_debug(f"[dim]{component}: {status}[/dim]")
 
-# Keep this function for compatibility with existing code
 async def update_display(layout: Layout, status_manager: StatusManager, live: Live):
     """Legacy function - kept for compatibility"""
     await asyncio.sleep(0.1)  # Do nothing
@@ -562,18 +561,34 @@ async def process_images(file_paths: List[str], lang: str = "eng",
     return results
 
 async def monitor_ollama_status(task_id, progress, stop_event, display_manager=None):
-    """Enhanced monitoring for Ollama server with more detailed metrics and status updates"""
+    """Enhanced monitoring for Ollama server with detailed system performance indicators"""
     try:
         import psutil
         import aiohttp
         
         last_stats = {}
-        rate_stats = {}
         last_update_time = time.time()
+        start_time = time.time()
+        previous_tokens = 0
+        
+        # First, immediately clear the "Connecting..." message
+        if progress:
+            progress.update(task_id, description=f"[green]Ollama connected")
+        
+        # Also log initial connection success to debug
+        if display_manager:
+            display_manager.add_debug(f"[green]✓ Connected to Ollama server[/green]")
+        
+        status_update_counter = 0
         
         while not stop_event.is_set():
-            stats = {}
+            metrics = {}
             current_time = time.time()
+            elapsed = current_time - start_time
+            status_update_counter += 1
+            
+            # Track the model being used
+            metrics["model"] = get_current_model()
             
             # Get process info - improved process detection
             try:
@@ -586,100 +601,147 @@ async def monitor_ollama_status(task_id, progress, stop_event, display_manager=N
                         proc.cpu_percent()
                         # Wait a moment for accuracy
                         await asyncio.sleep(0.5)
-                        stats["CPU"] = f"{proc.cpu_percent():.1f}%"
+                        cpu_percent = proc.cpu_percent()
+                        metrics["cpu"] = cpu_percent
+                        
                         if 'memory_info' in proc_info and proc_info['memory_info']:
                             mem_mb = proc_info['memory_info'].rss / (1024 * 1024)
-                            stats["Mem"] = f"{mem_mb:.0f}MB"
+                            metrics["memory"] = round(mem_mb)
                         break
                 
                 if not found:
-                    stats["Status"] = "Process not found"
+                    metrics["status"] = "Process not found"
             except Exception as e:
-                stats["Error"] = str(e)[:20]
+                metrics["error"] = str(e)[:20]
                 
-            # Try more detailed metrics endpoint
+            # Try API endpoints for metrics
             try:
                 async with aiohttp.ClientSession() as session:
-                    # First check the model status
-                    try:
-                        async with session.get('http://localhost:11434/api/show', 
-                                              params={'name': get_current_model()},
-                                              timeout=2) as response:
-                            if response.status == 200:
-                                model_data = await response.json()
-                                if 'parameters' in model_data:
-                                    stats["Model"] = f"{model_data.get('name', 'unknown')}"
-                                    params = model_data.get('parameters', {})
-                                    if params:
-                                        stats["Params"] = f"{params.get('num_params', 0)/1e9:.1f}B"
-                    except Exception:
-                        pass
-                        
-                    # Then check metrics
+                    # Check runtime metrics from Prometheus endpoint
                     async with session.get('http://localhost:11434/api/metrics', timeout=2) as response:
                         if response.status == 200:
                             text = await response.text()
+                            
                             # Parse Prometheus format metrics
-                            if "ollama_tokens_total" in text:
-                                tokens_value = 0
-                                tokens_per_sec = 0
-                                
-                                for line in text.split('\n'):
-                                    if line and not line.startswith('#'):
-                                        if "ollama_tokens_total" in line and "type=\"completion\"" in line:
-                                            try:
-                                                tokens_value = float(line.split('}')[1].strip())
-                                                if "tokens" in last_stats:
-                                                    elapsed = current_time - last_update_time
-                                                    if elapsed > 0:
-                                                        tokens_per_sec = (tokens_value - last_stats["tokens"]) / elapsed
-                                                last_stats["tokens"] = tokens_value
-                                                stats["Tokens"] = f"{int(tokens_value)}"
-                                                if tokens_per_sec > 0:
-                                                    stats["Speed"] = f"{tokens_per_sec:.1f}t/s"
-                                            except:
-                                                pass
-                                        elif "ollama_gpu_usage" in line:
-                                            try:
-                                                gpu_value = float(line.split('}')[1].strip())
-                                                stats["GPU"] = f"{gpu_value:.0f}%"
-                                            except:
-                                                pass
-            except aiohttp.ClientConnectorError:
-                stats["API"] = "Not available"
-            except Exception as e:
-                stats["API Error"] = str(e)[:20]
+                            total_tokens = 0
+                            
+                            for line in text.split('\n'):
+                                if not line or line.startswith('#'):
+                                    continue
+                                    
+                                # Extract key metrics
+                                if "ollama_tokens_total" in line and "type=\"completion\"" in line:
+                                    try:
+                                        total_tokens = int(float(line.split('}')[1].strip()))
+                                        metrics["tokens"] = total_tokens
+                                        
+                                        # Calculate token rate
+                                        if elapsed > 0 and total_tokens > 0:
+                                            # Overall rate
+                                            overall_rate = total_tokens / elapsed
+                                            metrics["overall_rate"] = overall_rate
+                                            
+                                            # Recent rate (since last check)
+                                            if previous_tokens > 0:
+                                                tokens_delta = total_tokens - previous_tokens
+                                                time_delta = current_time - last_update_time
+                                                if time_delta > 0:
+                                                    recent_rate = tokens_delta / time_delta
+                                                    metrics["token_rate"] = recent_rate
+                                            previous_tokens = total_tokens
+                                    except Exception:
+                                        pass
+                                        
+                                elif "ollama_gpu_usage" in line:
+                                    try:
+                                        metrics["gpu"] = round(float(line.split('}')[1].strip()), 1)
+                                    except Exception:
+                                        pass
+            except Exception:
+                pass
                 
-            # Always update with some status info even if empty
-            if not stats:
-                stats["Status"] = "Checking..."
-                
-            # Update progress display
-            status_text = " | ".join([f"{k}: {v}" for k, v in stats.items()])
+            # Format metrics for progress bar display
+            status_parts = []
+            if "model" in metrics:
+                status_parts.append(f"{metrics['model']}")
+            if "token_rate" in metrics:
+                status_parts.append(f"{metrics['token_rate']:.1f}t/s")
+            if "tokens" in metrics:
+                status_parts.append(f"{metrics['tokens']} tokens")
+            if "gpu" in metrics:
+                status_parts.append(f"GPU:{metrics['gpu']}%")
+            if "cpu" in metrics:
+                status_parts.append(f"CPU:{metrics['cpu']:.1f}%")
+            if "memory" in metrics:
+                status_parts.append(f"Mem:{metrics['memory']}MB")
+            
+            # Always update progress display
+            if not status_parts:
+                status_parts.append("Monitoring...")
+            status_text = " | ".join(status_parts)
             progress.update(task_id, description=f"[cyan]Ollama: {status_text}")
             
-            # Add significant changes to debug log
-            if display_manager and "Speed" in stats and ("last_speed" not in last_stats or 
-                                                       abs(float(stats["Speed"].split("t")[0]) - 
-                                                          float(last_stats.get("last_speed", "0").split("t")[0])) > 1.0):
-                display_manager.add_debug(f"[dim]Ollama generation rate: {stats['Speed']}[/dim]")
-                last_stats["last_speed"] = stats["Speed"]
+            # Log to debug output periodically rather than using a separate panel
+            # Every 5th update (about every ~10 seconds) or when significant changes occur
+            should_log = (status_update_counter % 5 == 0)
+            
+            # Also log if there are significant changes in performance
+            if ("token_rate" in metrics and "last_rate" in last_stats and 
+                abs(metrics["token_rate"] - last_stats["last_rate"]) > 2.0):
+                should_log = True
+            
+            if display_manager and should_log:
+                log_parts = []
+                
+                # Format a comprehensive but concise status line
+                if "model" in metrics:
+                    log_parts.append(f"[cyan]{metrics['model']}[/cyan]")
+                
+                if "tokens" in metrics:
+                    log_parts.append(f"{metrics['tokens']} tokens")
+                    
+                if "token_rate" in metrics:
+                    rate_info = f"{metrics['token_rate']:.1f} tokens/sec"
+                    # Add trend indicators
+                    if "last_rate" in last_stats:
+                        change = metrics["token_rate"] - last_stats["last_rate"] 
+                        if abs(change) > 0.5:
+                            direction = "↑" if change > 0 else "↓"
+                            color = "green" if change > 0 else "red"
+                            rate_info += f" [{color}]{direction}{abs(change):.1f}[/{color}]"
+                    log_parts.append(rate_info)
+                
+                hardware_parts = []
+                if "gpu" in metrics:
+                    hardware_parts.append(f"GPU: [magenta]{metrics['gpu']}%[/magenta]")
+                if "cpu" in metrics:
+                    hardware_parts.append(f"CPU: {metrics['cpu']:.1f}%")
+                if "memory" in metrics:
+                    hardware_parts.append(f"Mem: {metrics['memory']} MB")
+                
+                if hardware_parts:
+                    log_parts.append("(" + ", ".join(hardware_parts) + ")")
+                
+                # Add it to the debug output
+                display_manager.add_debug(f"[dim]Ollama status: {' | '.join(log_parts)}[/dim]")
+            
+            # Save for next comparison
+            if "token_rate" in metrics:
+                last_stats["last_rate"] = metrics["token_rate"]
             
             last_update_time = current_time
             
             # Check stop event with a timeout
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+                await asyncio.wait_for(stop_event.wait(), timeout=1.5)  # Check more frequently
             except asyncio.TimeoutError:
                 pass
             
     except Exception as e:
         if progress:
             progress.update(task_id, description=f"[red]Monitor error: {str(e)}")
-    finally:
-        # Tasks can't be removed, just hide it
-        if progress:
-            progress.update(task_id, visible=False)
+        if display_manager:
+            display_manager.add_debug(f"[yellow]Ollama monitor error: {str(e)}[/yellow]")
 
 async def analyze_with_ollama(results_file: str, output_dir: str, 
                               display_manager: Optional[DisplayManager] = None):
@@ -793,7 +855,7 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
             # Create a monitor task with enhanced status information
             monitor_stop_event = asyncio.Event()
             monitor_task_id = display_manager.detail_progress.add_task(
-                "[cyan]Monitoring Ollama...", 
+                "[cyan]Connecting to Ollama...",  # Clear initial message
                 total=None
             )
             monitor_task = asyncio.create_task(
