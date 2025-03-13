@@ -380,48 +380,13 @@ class StatusManager:
                 self._current_status.append(update)
             return [s.as_row for s in self._current_status]
 
-def create_status_table() -> Table:
-    """Create a new status table with consistent structure"""
-    table = Table.grid()
-    table.add_column("Component", style="blue")
-    table.add_column("Status", style="green")
-    # Add default row to prevent empty table
-    table.add_row("Status", "Initializing...")
-    return table
-
-async def update_display(layout: Layout, status_manager: StatusManager, live: Live):
-    """Update display with current status continuously"""
-    while True:
-        try:
-            # Get latest status
-            rows = await status_manager.get_status_rows()
-            
-            # Create fresh table
-            status_table = create_status_table()
-            for component, status in rows:
-                status_table.add_row(component, status)
-                
-            # Update layout with new table
-            layout["status"].update(Panel(status_table, title="System Status", border_style="blue"))
-            live.refresh()
-            
-            # Wait before next update
-            await asyncio.sleep(0.5)  # Update every 500ms
-            
-        except Exception as e:
-            # Fallback to error display
-            error_table = create_status_table()
-            error_table.add_row("Error", f"Display update failed: {str(e)[:30]}")
-            layout["status"].update(Panel(error_table, title="System Status", border_style="red"))
-
 class DisplayManager:
     """Unified display manager for consistent UI across all application states"""
     def __init__(self):
         self.layout = Layout()
         self.layout.split(
-            Layout(name="progress", ratio=2),
-            Layout(name="main", ratio=2), 
-            Layout(name="status", ratio=1)
+            Layout(name="progress", ratio=1),
+            Layout(name="main", ratio=1)
         )
         
         # Progress tracking components
@@ -444,8 +409,8 @@ class DisplayManager:
         progress_group.add_row(Panel(self.progress, title="Overall Progress"))
         progress_group.add_row(Panel(self.detail_progress, title="Current Task"))
         
-        # Status table
-        self.status_table = create_status_table()
+        # Keep status manager for future extension possibilities
+        self.status_manager = StatusManager()
         
         # Debug message storage
         self.debug_messages = []
@@ -453,11 +418,9 @@ class DisplayManager:
         # Configure the layout
         self.layout["progress"].update(progress_group)
         self.layout["main"].update(Panel(Text(), title="Debug Output"))
-        self.layout["status"].update(Panel(self.status_table, title="System Status", border_style="blue"))
         
         # Live display
         self.live = None
-        self.status_manager = StatusManager()
         
     def start(self, refresh_per_second=4):
         """Start the live display"""
@@ -471,11 +434,9 @@ class DisplayManager:
             self.live.stop()
             
     async def start_display_updater(self):
-        """Start the display updater task"""
-        self.display_task = asyncio.create_task(
-            update_display(self.layout, self.status_manager, self.live)
-        )
-        return self.display_task
+        """Start the display updater task - no longer needed but kept for API compatibility"""
+        # Just return a dummy completed task
+        return asyncio.create_task(asyncio.sleep(0))
             
     def add_debug(self, msg: str):
         """Add debug message"""
@@ -491,8 +452,13 @@ class DisplayManager:
             self.live.refresh()
             
     async def update_status(self, component: str, status: str):
-        """Update status display"""
-        await self.status_manager.update(component, status)
+        """Log status changes to debug output instead of using a separate status display"""
+        self.add_debug(f"[dim]{component}: {status}[/dim]")
+
+# Keep this function for compatibility with existing code
+async def update_display(layout: Layout, status_manager: StatusManager, live: Live):
+    """Legacy function - kept for compatibility"""
+    await asyncio.sleep(0.1)  # Do nothing
 
 async def process_images(file_paths: List[str], lang: str = "eng",
                          display_manager: Optional[DisplayManager] = None) -> List[Dict[str, Any]]:
@@ -595,14 +561,19 @@ async def process_images(file_paths: List[str], lang: str = "eng",
     
     return results
 
-async def monitor_ollama_status(task_id, progress, stop_event):
-    """Monitor the Ollama server status with comprehensive metrics"""
+async def monitor_ollama_status(task_id, progress, stop_event, display_manager=None):
+    """Enhanced monitoring for Ollama server with more detailed metrics and status updates"""
     try:
         import psutil
         import aiohttp
         
+        last_stats = {}
+        rate_stats = {}
+        last_update_time = time.time()
+        
         while not stop_event.is_set():
             stats = {}
+            current_time = time.time()
             
             # Get process info - improved process detection
             try:
@@ -617,41 +588,67 @@ async def monitor_ollama_status(task_id, progress, stop_event):
                         await asyncio.sleep(0.5)
                         stats["CPU"] = f"{proc.cpu_percent():.1f}%"
                         if 'memory_info' in proc_info and proc_info['memory_info']:
-                            stats["Memory"] = f"{proc_info['memory_info'].rss / (1024 * 1024):.1f} MB"
+                            mem_mb = proc_info['memory_info'].rss / (1024 * 1024)
+                            stats["Mem"] = f"{mem_mb:.0f}MB"
                         break
                 
-                # Only try API if process wasn't found
                 if not found:
-                    stats["Process"] = "Not detected"
+                    stats["Status"] = "Process not found"
             except Exception as e:
-                stats["Process Error"] = str(e)[:30]
+                stats["Error"] = str(e)[:20]
                 
-            # Try metrics endpoint for advanced metrics with better error handling
+            # Try more detailed metrics endpoint
             try:
                 async with aiohttp.ClientSession() as session:
+                    # First check the model status
+                    try:
+                        async with session.get('http://localhost:11434/api/show', 
+                                              params={'name': get_current_model()},
+                                              timeout=2) as response:
+                            if response.status == 200:
+                                model_data = await response.json()
+                                if 'parameters' in model_data:
+                                    stats["Model"] = f"{model_data.get('name', 'unknown')}"
+                                    params = model_data.get('parameters', {})
+                                    if params:
+                                        stats["Params"] = f"{params.get('num_params', 0)/1e9:.1f}B"
+                    except Exception:
+                        pass
+                        
+                    # Then check metrics
                     async with session.get('http://localhost:11434/api/metrics', timeout=2) as response:
                         if response.status == 200:
                             text = await response.text()
                             # Parse Prometheus format metrics
-                            if "ollama_requests_total" in text:
+                            if "ollama_tokens_total" in text:
+                                tokens_value = 0
+                                tokens_per_sec = 0
+                                
                                 for line in text.split('\n'):
                                     if line and not line.startswith('#'):
                                         if "ollama_tokens_total" in line and "type=\"completion\"" in line:
                                             try:
-                                                value = float(line.split('}')[1].strip())
-                                                stats["Tokens"] = f"{int(value)}"
+                                                tokens_value = float(line.split('}')[1].strip())
+                                                if "tokens" in last_stats:
+                                                    elapsed = current_time - last_update_time
+                                                    if elapsed > 0:
+                                                        tokens_per_sec = (tokens_value - last_stats["tokens"]) / elapsed
+                                                last_stats["tokens"] = tokens_value
+                                                stats["Tokens"] = f"{int(tokens_value)}"
+                                                if tokens_per_sec > 0:
+                                                    stats["Speed"] = f"{tokens_per_sec:.1f}t/s"
                                             except:
                                                 pass
-                                        elif "ollama_requests_total" in line and "status=\"200\"" in line:
+                                        elif "ollama_gpu_usage" in line:
                                             try:
-                                                value = float(line.split('}')[1].strip())
-                                                stats["Requests"] = f"{int(value)}"
+                                                gpu_value = float(line.split('}')[1].strip())
+                                                stats["GPU"] = f"{gpu_value:.0f}%"
                                             except:
                                                 pass
             except aiohttp.ClientConnectorError:
                 stats["API"] = "Not available"
             except Exception as e:
-                stats["API Error"] = str(e)[:30]
+                stats["API Error"] = str(e)[:20]
                 
             # Always update with some status info even if empty
             if not stats:
@@ -661,6 +658,15 @@ async def monitor_ollama_status(task_id, progress, stop_event):
             status_text = " | ".join([f"{k}: {v}" for k, v in stats.items()])
             progress.update(task_id, description=f"[cyan]Ollama: {status_text}")
             
+            # Add significant changes to debug log
+            if display_manager and "Speed" in stats and ("last_speed" not in last_stats or 
+                                                       abs(float(stats["Speed"].split("t")[0]) - 
+                                                          float(last_stats.get("last_speed", "0").split("t")[0])) > 1.0):
+                display_manager.add_debug(f"[dim]Ollama generation rate: {stats['Speed']}[/dim]")
+                last_stats["last_speed"] = stats["Speed"]
+            
+            last_update_time = current_time
+            
             # Check stop event with a timeout
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=2.0)
@@ -668,10 +674,12 @@ async def monitor_ollama_status(task_id, progress, stop_event):
                 pass
             
     except Exception as e:
-        progress.update(task_id, description=f"[red]Monitor error: {str(e)}")
+        if progress:
+            progress.update(task_id, description=f"[red]Monitor error: {str(e)}")
     finally:
         # Tasks can't be removed, just hide it
-        progress.update(task_id, visible=False)
+        if progress:
+            progress.update(task_id, visible=False)
 
 async def analyze_with_ollama(results_file: str, output_dir: str, 
                               display_manager: Optional[DisplayManager] = None):
@@ -782,6 +790,21 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
             analysis = ""
             tokens = 0
             
+            # Create a monitor task with enhanced status information
+            monitor_stop_event = asyncio.Event()
+            monitor_task_id = display_manager.detail_progress.add_task(
+                "[cyan]Monitoring Ollama...", 
+                total=None
+            )
+            monitor_task = asyncio.create_task(
+                monitor_ollama_status(
+                    monitor_task_id, 
+                    display_manager.detail_progress, 
+                    monitor_stop_event,
+                    display_manager  # Pass display_manager to allow logging
+                )
+            )
+            
             async with aiohttp.ClientSession() as session:
                 data = {
                     'model': model_name,
@@ -792,7 +815,8 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
                         'num_predict': 4096
                     }
                 }
-                display_manager.add_debug(f"[blue]Sending to Ollama: {data}[/blue]")
+                # Replace verbose output with concise summary
+                display_manager.add_debug(f"[blue]Sending request to {model_name} - {prompt_size/1000:.1f}K chars{' (with custom prompt)' if has_custom_prompt else ''}[/blue]")
                 async with session.post(
                     'http://localhost:11434/api/generate',
                     json=data,
@@ -841,6 +865,13 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
                             except json.JSONDecodeError:
                                 pass
             
+            # Stop the monitoring task
+            monitor_stop_event.set()
+            try:
+                await monitor_task
+            except Exception as e:
+                display_manager.add_debug(f"[yellow]Error stopping monitor: {str(e)}[/yellow]")
+        
         except Exception as e:
             display_manager.add_debug(f"[yellow]Streaming error: {e}. Falling back to standard API.[/yellow]")
             # Fallback to standard API
@@ -1189,7 +1220,7 @@ def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
         if choice == "1":
             prev_dir = config.get("last_directory", os.getcwd())
             new_dir = select_directory()
-            if prev_dir != new_dir:
+            if (prev_dir != new_dir):
                 config["last_directory"] = new_dir
                 save_config(config)
         
