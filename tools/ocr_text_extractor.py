@@ -358,7 +358,7 @@ async def clean_text_with_ollama(
                     progress=progress,
                     task_id=task_id
                 ),
-                timeout=60  # 60 second timeout
+                timeout=360  # 360 second timeout
             )
             if display_manager:
                 elapsed = time.time() - start_time
