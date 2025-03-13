@@ -25,6 +25,82 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 from rich.text import Text  # Add this import
 
+# Define DisplayManager class here
+class DisplayManager:
+    """Unified display manager for consistent UI across all application states"""
+    def __init__(self):
+        self.layout = Layout()
+        self.layout.split(
+            Layout(name="progress", ratio=1),
+            Layout(name="main", ratio=2)  # Increased ratio for more debug space
+        )
+        
+        # Progress tracking components
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(complete_style="cyan", finished_style="green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+        )
+        
+        self.detail_progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(complete_style="yellow", finished_style="green"),
+            TimeElapsedColumn(),
+        )
+        
+        # Setup progress group
+        progress_group = Table.grid()
+        progress_group.add_row(Panel(self.progress, title="Overall Progress"))
+        progress_group.add_row(Panel(self.detail_progress, title="Current Task"))
+        
+        # Keep status manager for future extension possibilities
+        self.status_manager = StatusManager()
+        
+        # Debug message storage
+        self.debug_messages = []
+        
+        # Configure the layout
+        self.layout["progress"].update(progress_group)
+        self.layout["main"].update(Panel(Text(), title="Debug Output"))
+        
+        # Live display
+        self.live = None
+        
+    def start(self, refresh_per_second=4):
+        """Start the live display"""
+        self.live = Live(self.layout, refresh_per_second=refresh_per_second)
+        self.live.start()
+        return self.live
+        
+    def stop(self):
+        """Stop the live display"""
+        if self.live:
+            self.live.stop()
+            
+    async def start_display_updater(self):
+        """Start the display updater task - no longer needed but kept for API compatibility"""
+        # Just return a dummy completed task
+        return asyncio.create_task(asyncio.sleep(0))
+            
+    def add_debug(self, msg: str):
+        """Add debug message"""
+        if not self.live:
+            console.print(msg)
+            return
+            
+        plain_msg = Text.from_markup(msg).plain
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.debug_messages.append(f"{timestamp} {plain_msg}")
+        self.layout["main"].update(Panel(Text("\n".join(self.debug_messages[-10:])), title="Debug Output"))
+        if self.live:
+            self.live.refresh()
+            
+    async def update_status(self, component: str, status: str):
+        """Log status changes to debug output instead of using a separate status display"""
+        self.add_debug(f"[dim]{component}: {status}[/dim]")
+
 # Constants
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.JPG', '.PNG', '.JPEG', '.TIFF', '.pdf', '.PDF'}
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/ocr_results")
@@ -230,7 +306,12 @@ async def extract_text_from_image(image_path: str, lang: str = "eng", progress: 
         console.print(f"[bold red]Error processing {image_path}: {str(e)}[/bold red]")
         return f"ERROR: {str(e)}"
 
-async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None, task_id: Optional[int] = None) -> str:
+async def clean_text_with_ollama(
+    text: str,
+    progress: Optional[Progress] = None,
+    task_id: Optional[int] = None,
+    display_manager: Optional[DisplayManager] = None  # <-- Added parameter for debug output
+) -> str:
     """Clean the OCR text using Ollama with better error reporting"""
     try:
         import ollama
@@ -243,10 +324,11 @@ async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None,
         
         if progress:
             progress.update(task_id, description=f"[magenta]Ollama: Preparing to clean text...")
+        if display_manager:
+            display_manager.add_debug("[blue]Ollama OCR cleanup: Initiating cleanup process...[/blue]")
         
         prompt = f"You are a helpful assistant. Clean up this OCR text:\n\n{text}\n\nCleaned text:"
         
-        # Add timeout handling
         try:
             start_time = time.time()
             cleaned_text = await asyncio.wait_for(
@@ -259,16 +341,23 @@ async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None,
                 ),
                 timeout=60  # 60 second timeout
             )
+            if display_manager:
+                elapsed = time.time() - start_time
+                display_manager.add_debug(f"[blue]Ollama OCR cleanup: Completed in {elapsed:.2f}s[/blue]")
             return cleaned_text
             
         except asyncio.TimeoutError:
             if progress:
                 progress.update(task_id, description=f"[red]Ollama: Timed out after 60s, using original text")
+            if display_manager:
+                display_manager.add_debug("[red]Ollama OCR cleanup: Timed out after 60s[/red]")
             return text
             
         except Exception as e:
             if progress:
                 progress.update(task_id, description=f"[red]Ollama error: {str(e)}, using original text")
+            if display_manager:
+                display_manager.add_debug(f"[red]Ollama OCR cleanup: Error - {str(e)}[/red]")
             return text
             
     except Exception as e:
@@ -379,81 +468,6 @@ class StatusManager:
                 self._current_status = [s for s in self._current_status if s._component != update._component]
                 self._current_status.append(update)
             return [s.as_row for s in self._current_status]
-
-class DisplayManager:
-    """Unified display manager for consistent UI across all application states"""
-    def __init__(self):
-        self.layout = Layout()
-        self.layout.split(
-            Layout(name="progress", ratio=1),
-            Layout(name="main", ratio=2)  # Increased ratio for more debug space
-        )
-        
-        # Progress tracking components
-        self.progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(complete_style="cyan", finished_style="green"),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-        )
-        
-        self.detail_progress = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(complete_style="yellow", finished_style="green"),
-            TimeElapsedColumn(),
-        )
-        
-        # Setup progress group
-        progress_group = Table.grid()
-        progress_group.add_row(Panel(self.progress, title="Overall Progress"))
-        progress_group.add_row(Panel(self.detail_progress, title="Current Task"))
-        
-        # Keep status manager for future extension possibilities
-        self.status_manager = StatusManager()
-        
-        # Debug message storage
-        self.debug_messages = []
-        
-        # Configure the layout
-        self.layout["progress"].update(progress_group)
-        self.layout["main"].update(Panel(Text(), title="Debug Output"))
-        
-        # Live display
-        self.live = None
-        
-    def start(self, refresh_per_second=4):
-        """Start the live display"""
-        self.live = Live(self.layout, refresh_per_second=refresh_per_second)
-        self.live.start()
-        return self.live
-        
-    def stop(self):
-        """Stop the live display"""
-        if self.live:
-            self.live.stop()
-            
-    async def start_display_updater(self):
-        """Start the display updater task - no longer needed but kept for API compatibility"""
-        # Just return a dummy completed task
-        return asyncio.create_task(asyncio.sleep(0))
-            
-    def add_debug(self, msg: str):
-        """Add debug message"""
-        if not self.live:
-            console.print(msg)
-            return
-            
-        plain_msg = Text.from_markup(msg).plain
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        self.debug_messages.append(f"{timestamp} {plain_msg}")
-        self.layout["main"].update(Panel(Text("\n".join(self.debug_messages[-10:])), title="Debug Output"))
-        if self.live:
-            self.live.refresh()
-            
-    async def update_status(self, component: str, status: str):
-        """Log status changes to debug output instead of using a separate status display"""
-        self.add_debug(f"[dim]{component}: {status}[/dim]")
 
 async def update_display(layout: Layout, status_manager: StatusManager, live: Live):
     """Legacy function - kept for compatibility"""
@@ -790,7 +804,7 @@ async def analyze_with_ollama(results_file: str, output_dir: str,
         post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
         post_prompt = ""
         has_custom_prompt = False
-        if os.path.exists(post_prompt_file):
+        if (os.path.exists(post_prompt_file)):
             try:
                 with open(post_prompt_file, 'r', encoding='utf-8') as f:
                     post_prompt = f.read()
