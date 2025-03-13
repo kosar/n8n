@@ -30,6 +30,7 @@ SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/ocr_results")
 CONFIG_DIR = os.path.expanduser("~/.ocr_extractor")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+DEFAULT_MODEL = "mistral-small" # A single place to define the default model
 
 # Enhanced prompt for chronological conversation reconstruction
 ANALYSIS_PROMPT = """
@@ -69,7 +70,7 @@ def load_config() -> Dict[str, Any]:
         "last_directory": os.getcwd(),
         "output_directory": DEFAULT_OUTPUT_DIR,
         "last_language": "eng",
-        "selected_model": "yarn-llama2"
+        "selected_model": DEFAULT_MODEL
     }
     
     try:
@@ -122,7 +123,7 @@ def check_ollama_status() -> bool:
     try:
         import ollama
         config = load_config()
-        selected_model = config.get("selected_model", "yarn-llama2:latest")
+        selected_model = config.get("selected_model", DEFAULT_MODEL)
         
         models = get_available_models()
         if models:
@@ -141,6 +142,14 @@ def check_ollama_status() -> bool:
     except Exception as e:
         console.print(f"[yellow]⚠ Ollama server not accessible: {str(e)}[/yellow]")
         return False
+
+def get_current_model() -> str:
+    """Get the current model from config or return default if unavailable"""
+    try:
+        config = load_config()
+        return config.get("selected_model", DEFAULT_MODEL)
+    except Exception:
+        return DEFAULT_MODEL
 
 def select_directory() -> str:
     """Simple directory selection via prompt"""
@@ -230,8 +239,7 @@ async def clean_text_with_ollama(text: str, progress: Optional[Progress] = None,
         return text
         
     try:
-        config = load_config()
-        model_name = config.get("selected_model", "yarn-llama2")
+        model_name = get_current_model()
         
         if progress:
             progress.update(task_id, description=f"[magenta]Ollama: Preparing to clean text...")
@@ -406,136 +414,184 @@ async def update_display(layout: Layout, status_manager: StatusManager, live: Li
             error_table.add_row("Error", f"Display update failed: {str(e)[:30]}")
             layout["status"].update(Panel(error_table, title="System Status", border_style="red"))
 
-async def process_images(file_paths: List[str], lang: str = "eng") -> List[Dict[str, Any]]:
+class DisplayManager:
+    """Unified display manager for consistent UI across all application states"""
+    def __init__(self):
+        self.layout = Layout()
+        self.layout.split(
+            Layout(name="progress", ratio=2),
+            Layout(name="main", ratio=2), 
+            Layout(name="status", ratio=1)
+        )
+        
+        # Progress tracking components
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(complete_style="cyan", finished_style="green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+        )
+        
+        self.detail_progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(complete_style="yellow", finished_style="green"),
+            TimeElapsedColumn(),
+        )
+        
+        # Setup progress group
+        progress_group = Table.grid()
+        progress_group.add_row(Panel(self.progress, title="Overall Progress"))
+        progress_group.add_row(Panel(self.detail_progress, title="Current Task"))
+        
+        # Status table
+        self.status_table = create_status_table()
+        
+        # Debug message storage
+        self.debug_messages = []
+        
+        # Configure the layout
+        self.layout["progress"].update(progress_group)
+        self.layout["main"].update(Panel(Text(), title="Debug Output"))
+        self.layout["status"].update(Panel(self.status_table, title="System Status", border_style="blue"))
+        
+        # Live display
+        self.live = None
+        self.status_manager = StatusManager()
+        
+    def start(self, refresh_per_second=4):
+        """Start the live display"""
+        self.live = Live(self.layout, refresh_per_second=refresh_per_second)
+        self.live.start()
+        return self.live
+        
+    def stop(self):
+        """Stop the live display"""
+        if self.live:
+            self.live.stop()
+            
+    async def start_display_updater(self):
+        """Start the display updater task"""
+        self.display_task = asyncio.create_task(
+            update_display(self.layout, self.status_manager, self.live)
+        )
+        return self.display_task
+            
+    def add_debug(self, msg: str):
+        """Add debug message"""
+        if not self.live:
+            console.print(msg)
+            return
+            
+        plain_msg = Text.from_markup(msg).plain
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.debug_messages.append(f"{timestamp} {plain_msg}")
+        self.layout["main"].update(Panel(Text("\n".join(self.debug_messages[-10:])), title="Debug Output"))
+        if self.live:
+            self.live.refresh()
+            
+    async def update_status(self, component: str, status: str):
+        """Update status display"""
+        await self.status_manager.update(component, status)
+
+async def process_images(file_paths: List[str], lang: str = "eng",
+                         display_manager: Optional[DisplayManager] = None) -> List[Dict[str, Any]]:
     """Process images with thread-safe status updates"""
     if not file_paths:
         console.print("[yellow]No files selected for processing.[/yellow]")
         return []
     
     results = []
-    status_manager = StatusManager()
     
-    # Create layout
-    layout = Layout()
-    layout.split(
-        Layout(name="progress", ratio=2),
-        Layout(name="main", ratio=2),
-        Layout(name="status", ratio=1)
-    )
-    
-    # Initialize components
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(complete_style="cyan", finished_style="green"),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-    )
-    detail_progress = Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(complete_style="yellow", finished_style="green"),
-        TimeElapsedColumn(),
-    )
-    status_table = create_status_table()
-    
-    # Group progress displays
-    progress_group = Table.grid()
-    progress_group.add_row(Panel(progress, title="Overall Progress"))
-    progress_group.add_row(Panel(detail_progress, title="Current Task"))
-    
-    # Configure layout
-    layout["progress"].update(progress_group)
-    layout["main"].update(Panel(Text(), title="Debug Output"))
-    layout["status"].update(Panel(status_table, title="System Status", border_style="blue"))
-    
+    # Create display manager if not provided
+    using_local_display = display_manager is None
+    if using_local_display:
+        display_manager = DisplayManager()
+        
     try:
-        with Live(layout, refresh_per_second=4) as live:
-            # Start display updater task with live context
-            display_task = asyncio.create_task(
-                update_display(layout, status_manager, live)
+        if using_local_display:
+            live = display_manager.start()
+            display_task = await display_manager.start_display_updater()
+            
+        # Initial status
+        await display_manager.update_status("Status", "Starting processing...")
+        
+        # Process files
+        main_task = display_manager.progress.add_task(
+            f"[cyan]Processing {len(file_paths)} images...", 
+            total=len(file_paths)
+        )
+        
+        display_manager.add_debug("[cyan]Starting processing...[/cyan]")
+        
+        for file_path in file_paths:
+            filename = os.path.basename(file_path)
+            display_manager.add_debug(f"[blue]Processing {filename}...[/blue]")
+            
+            # Add subtasks for better tracking
+            ocr_task = display_manager.detail_progress.add_task(
+                f"[blue]OCR: {filename}", 
+                total=1,
+                start=False
             )
             
-            # Initial status
-            await status_manager.update("Status", "Starting processing...")
-            
-            # Process files
-            main_task = progress.add_task(
-                f"[cyan]Processing {len(file_paths)} images...", 
-                total=len(file_paths)
-            )
-            
-            debug_messages = []
-            
-            def add_debug(msg: str):
-                # Strip color markup before adding timestamp
-                plain_msg = Text.from_markup(msg).plain
-                debug_messages.append(f"{datetime.now().strftime('%H:%M:%S')} {plain_msg}")
-                layout["main"].update(Panel(Text("\n".join(debug_messages[-10:])), title="Debug Output"))
-                live.refresh()
-            
-            add_debug("[cyan]Starting processing...[/cyan]")
-            
-            for file_path in file_paths:
-                filename = os.path.basename(file_path)
-                add_debug(f"[blue]Processing {filename}...[/blue]")
-                
-                # Add subtasks for better tracking
-                ocr_task = detail_progress.add_task(
-                    f"[blue]OCR: {filename}", 
-                    total=1,
-                    start=False
+            try:
+                display_manager.detail_progress.start_task(ocr_task)
+                ocr_text = await extract_text_from_image(
+                    file_path, lang, display_manager.detail_progress, ocr_task
                 )
                 
-                try:
-                    detail_progress.start_task(ocr_task)
-                    ocr_text = await extract_text_from_image(file_path, lang, detail_progress, ocr_task)
-                    
-                    if "ERROR:" in ocr_text:
-                        add_debug(f"[red]OCR failed for {filename}: {ocr_text}[/red]")
-                    else:
-                        add_debug(f"[green]OCR completed for {filename}[/green]")
-                    
-                    detail_progress.update(ocr_task, completed=1)
-                    
-                    metadata = get_image_metadata(file_path)
-                    result = {
-                        "filename": filename,
-                        "file_path": file_path,
-                        "metadata": metadata,
-                        "text": ocr_text,
-                        "processed_at": datetime.now().isoformat()
-                    }
-                    results.append(result)
-                    
-                    # Update status via manager
-                    await status_manager.update("Processing", f"Processing {os.path.basename(file_path)}")
-                    await status_manager.update("Progress", f"Completed {len(results)}/{len(file_paths)}")
-                    
-                except Exception as e:
-                    error_msg = f"Error processing {filename}: {str(e)}"
-                    add_debug(f"[red]{error_msg}[/red]")
-                    results.append({
-                        "filename": filename,
-                        "file_path": file_path,
-                        "error": str(e),
-                        "processed_at": datetime.now().isoformat()
-                    })
-                    await status_manager.update("Error", f"Failed: {str(e)[:30]}")
+                if "ERROR:" in ocr_text:
+                    display_manager.add_debug(f"[red]OCR failed for {filename}: {ocr_text}[/red]")
+                else:
+                    display_manager.add_debug(f"[green]OCR completed for {filename}[/green]")
                 
-                progress.advance(main_task)
+                display_manager.detail_progress.update(ocr_task, completed=1)
+                
+                metadata = get_image_metadata(file_path)
+                result = {
+                    "filename": filename,
+                    "file_path": file_path,
+                    "metadata": metadata,
+                    "text": ocr_text,
+                    "processed_at": datetime.now().isoformat()
+                }
+                results.append(result)
+                
+                # Update status
+                await display_manager.update_status("Processing", f"Processing {filename}")
+                await display_manager.update_status("Progress", f"Completed {len(results)}/{len(file_paths)}")
+                
+            except Exception as e:
+                error_msg = f"Error processing {filename}: {str(e)}"
+                display_manager.add_debug(f"[red]{error_msg}[/red]")
+                results.append({
+                    "filename": filename,
+                    "file_path": file_path,
+                    "error": str(e),
+                    "processed_at": datetime.now().isoformat()
+                })
+                await display_manager.update_status("Error", f"Failed: {str(e)[:30]}")
             
-            add_debug("[green]Processing complete![/green]")
-            
+            display_manager.progress.advance(main_task)
+        
+        display_manager.add_debug("[green]Processing complete![/green]")
+        
+        # Clean up if we created the display
+        if using_local_display:
             # Clean up display task
             display_task.cancel()
             try:
                 await asyncio.wait_for(display_task, timeout=1.0)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+            display_manager.stop()
             
     except Exception as e:
         console.print(f"[bold red]Display error: {str(e)}[/bold red]")
         console.print(traceback.format_exc())
+        if using_local_display:
+            display_manager.stop()
     
     return results
 
@@ -617,291 +673,243 @@ async def monitor_ollama_status(task_id, progress, stop_event):
         # Tasks can't be removed, just hide it
         progress.update(task_id, visible=False)
 
-async def analyze_with_ollama(results_file: str, output_dir: str):
-    """Analyze OCR results with Ollama using the selected model with detailed monitoring"""
+async def analyze_with_ollama(results_file: str, output_dir: str, 
+                              display_manager: Optional[DisplayManager] = None):
+    """Analyze OCR results with Ollama - unified display approach"""
     try:
         import ollama
         import aiohttp
         import json
         
-        # Set up a layout for a sophisticated display with multiple panels
-        layout = Layout()
-        layout.split_column(
-            Layout(name="progress", ratio=4),
-            Layout(name="server_status", ratio=1)
-        )
+        using_local_display = display_manager is None
+        if using_local_display:
+            display_manager = DisplayManager() 
+            live = display_manager.start()
+            display_task = await display_manager.start_display_updater()
+            
+        await display_manager.update_status("Status", "Starting analysis...")
+        display_manager.add_debug("[cyan]Connecting to Ollama server...[/cyan]")
         
-        # Progress tracking
-        progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(complete_style="cyan", finished_style="green"),
-            TimeElapsedColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        )
+        # Load results
+        load_task = display_manager.progress.add_task("[cyan]Loading OCR results...", total=1)
+        with open(results_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            results = data.get("results", [])
+        display_manager.progress.update(load_task, completed=1)
+
+        file_paths = [result.get("file_path") for result in results if "file_path" in result]
         
-        # Server status table
-        server_table = Table.grid(padding=(0, 1))
-        server_table.add_column("Component", style="blue")
-        server_table.add_column("Value", style="green")
+        # Step 1: Create summary and copy images
+        copy_task = display_manager.progress.add_task("[cyan]Creating output resources...", total=2)
         
-        # Function to update server status
-        def update_server_status(tokens=None, rate=None):
-            server_table.rows = []
-            
-            # Add ollama process info
-            for proc in psutil.process_iter(['name', 'cpu_percent', 'memory_info']):
-                if 'ollama' in proc.info['name'].lower():
-                    server_table.add_row("Ollama CPU", f"{proc.info['cpu_percent']:.1f}%")
-                    server_table.add_row("Ollama Memory", f"{proc.info['memory_info'].rss / (1024 * 1024):.1f} MB")
-                    break
-            
-            # Add token generation stats
-            if tokens is not None:
-                server_table.add_row("Tokens Generated", f"{tokens}")
-            if rate is not None:
-                server_table.add_row("Generation Rate", f"{rate:.2f} tokens/sec")
-            
-            # Add system stats
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            server_table.add_row("System CPU", f"{cpu_percent}%")
-            server_table.add_row("System Memory", f"{memory.percent}%")
-            
-            # Try to get GPU info if available
+        display_manager.add_debug("[cyan]Copying images to output directory...[/cyan]")
+        display_manager.progress.update(copy_task, description="[cyan]Copying images to output directory...")
+        image_map = copy_images_to_output(file_paths, output_dir)
+        display_manager.progress.update(copy_task, advance=1)
+
+        display_manager.add_debug("[cyan]Creating markdown summary...[/cyan]")
+        display_manager.progress.update(copy_task, description="[cyan]Creating markdown summary...")
+        markdown_path = await create_markdown_summary(results, results_file, image_map)
+        display_manager.progress.update(copy_task, advance=1, description="[green]Output resources prepared")
+        display_manager.add_debug(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
+
+        # Step 2: Prepare the prompt
+        prompt_task = display_manager.progress.add_task("[cyan]Building analysis prompt...", total=1)
+        
+        # Read postprompt.txt if it exists
+        post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
+        post_prompt = ""
+        has_custom_prompt = False
+        if os.path.exists(post_prompt_file):
             try:
-                result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used',
-                                      '--format=csv,noheader,nounits'], 
-                                      capture_output=True, text=True, timeout=1)
-                if result.returncode == 0:
-                    values = result.stdout.strip().split(',')
-                    server_table.add_row("GPU Usage", f"{values[0].strip()}%")
-                    server_table.add_row("GPU Memory", f"{values[1].strip()} MB")
-            except:
-                pass
+                with open(post_prompt_file, 'r', encoding='utf-8') as f:
+                    post_prompt = f.read()
+                if post_prompt.strip():
+                    has_custom_prompt = True
+                    display_manager.add_debug(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
+            except Exception as e:
+                display_manager.add_debug(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
+        else:
+            display_manager.add_debug(f"[blue]Using default prompt only (no postprompt.txt found)[/blue]")
+
+        # Generate the prompt with simplified data
+        simplified_data = []
+        for result in results:
+            simplified_entry = {
+                "filename": result.get("filename", "unknown"),
+                "text": result.get("text", ""),
+            }
+            if "date" in result:
+                simplified_entry["date"] = result["date"]
+            if "sender" in result:
+                simplified_entry["sender"] = result["sender"]
+            simplified_data.append(simplified_entry)
+
+        prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
+        prompt += json.dumps(simplified_data, indent=2)
         
-        # Configure layout components
-        layout["progress"].update(progress)
-        layout["server_status"].update(Panel(server_table, title="Ollama Server Status", border_style="blue"))
+        if post_prompt:
+            prompt += "\n\n" + post_prompt
         
-        update_server_status()  # Initial update
+        # Display prompt statistics
+        prompt_size = len(prompt)
+        token_estimate = prompt_size // 4  # rough estimate
+        display_manager.progress.update(prompt_task, completed=1, description=f"[green]Prompt ready: {prompt_size/1000:.1f}K chars (~{token_estimate} tokens)")
         
-        with Live(layout, refresh_per_second=4) as live:
-            console.print("[cyan]Connecting to Ollama server...[/cyan]")
-            
-            # Load results
-            load_task = progress.add_task("[cyan]Loading OCR results...", total=1)
-            with open(results_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                results = data.get("results", [])
-            progress.update(load_task, completed=1)
+        # Step 3: Set up the model
+        model_name = get_current_model()
+        model_task = display_manager.progress.add_task(f"[cyan]Setting up model: {model_name}...", total=1)
 
-            file_paths = [result.get("file_path") for result in results if "file_path" in result]
-            
-            # Step 1: Create summary and copy images
-            copy_task = progress.add_task("[cyan]Creating output resources...", total=2)
-            
-            progress.update(copy_task, description="[cyan]Copying images to output directory...")
-            image_map = copy_images_to_output(file_paths, output_dir)
-            progress.update(copy_task, advance=1)
-            live.refresh()
+        try:
+            models = ollama.list()
+            model_names = [m.model for m in models if hasattr(m, 'model')]
 
-            progress.update(copy_task, description="[cyan]Creating markdown summary...")
-            markdown_path = await create_markdown_summary(results, results_file, image_map)
-            progress.update(copy_task, advance=1, description="[green]Output resources prepared")
-            console.print(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
-            live.refresh()
-
-            # Step 2: Prepare the prompt
-            prompt_task = progress.add_task("[cyan]Building analysis prompt...", total=1)
+            if model_name not in model_names:
+                display_manager.progress.update(model_task, description=f"[yellow]Pulling model: {model_name}...")
+                ollama.pull(model_name)
+            display_manager.progress.update(model_task, completed=1, description=f"[green]Model {model_name} ready")
+        except Exception as e:
+            display_manager.add_debug(f"[yellow]Error checking models, will try to use {model_name} directly: {str(e)}[/yellow]")
+            display_manager.progress.update(model_task, completed=1, description=f"[yellow]Model status unknown")
+        
+        # Step 4: Run the analysis with detailed monitoring
+        analysis_task = display_manager.progress.add_task(f"[cyan]Analyzing with {model_name}...", total=100)
+        display_manager.add_debug(f"[cyan]Analyzing text with {model_name} - this may take several minutes...[/cyan]")
+        start_time = time.time()
+        
+        try:
+            # Try streaming approach for better monitoring
+            analysis = ""
+            tokens = 0
             
-            # Read postprompt.txt if it exists
-            post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
-            post_prompt = ""
-            has_custom_prompt = False
-            if os.path.exists(post_prompt_file):
-                try:
-                    with open(post_prompt_file, 'r', encoding='utf-8') as f:
-                        post_prompt = f.read()
-                    if post_prompt.strip():
-                        has_custom_prompt = True
-                        console.print(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
-            else:
-                console.print(f"[blue]Using default prompt only (no postprompt.txt found)[/blue]")
-
-            # Generate the prompt with simplified data
-            simplified_data = []
-            for result in results:
-                simplified_entry = {
-                    "filename": result.get("filename", "unknown"),
-                    "text": result.get("text", ""),
+            async with aiohttp.ClientSession() as session:
+                data = {
+                    'model': model_name,
+                    'prompt': prompt,
+                    'stream': True,
+                    'options': {
+                        'temperature': 0.2,
+                        'num_predict': 4096
+                    }
                 }
-                if "date" in result:
-                    simplified_entry["date"] = result["date"]
-                if "sender" in result:
-                    simplified_entry["sender"] = result["sender"]
-                simplified_data.append(simplified_entry)
-
-            prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
-            prompt += json.dumps(simplified_data, indent=2)
-            
-            if post_prompt:
-                prompt += "\n\n" + post_prompt
-            
-            # Display prompt statistics
-            prompt_size = len(prompt)
-            token_estimate = prompt_size // 4  # rough estimate
-            progress.update(prompt_task, completed=1, description=f"[green]Prompt ready: {prompt_size/1000:.1f}K chars (~{token_estimate} tokens)")
-            live.refresh()
-            
-            # Step 3: Set up the model
-            config = load_config()
-            model_name = config.get("selected_model", "yarn-llama2")
-            model_task = progress.add_task(f"[cyan]Setting up model: {model_name}...", total=1)
-
-            try:
-                models = ollama.list()
-                model_names = [m.model for m in models if hasattr(m, 'model')]
-
-                if model_name not in model_names:
-                    progress.update(model_task, description=f"[yellow]Pulling model: {model_name}...")
-                    ollama.pull(model_name)
-                progress.update(model_task, completed=1, description=f"[green]Model {model_name} ready")
-            except Exception as e:
-                console.print(f"[yellow]Error checking models, will try to use {model_name} directly: {str(e)}[/yellow]")
-                progress.update(model_task, completed=1, description=f"[yellow]Model status unknown")
-            
-            live.refresh()
-
-            # Step 4: Run the analysis with detailed monitoring
-            analysis_task = progress.add_task(f"[cyan]Analyzing with {model_name}...", total=100)
-            console.print(f"[cyan]Analyzing text with {model_name} - this may take several minutes...[/cyan]")
-            start_time = time.time()
-            
-            try:
-                # Try streaming approach for better monitoring
-                analysis = ""
-                tokens = 0
-                
-                async with aiohttp.ClientSession() as session:
-                    data = {
-                        'model': model_name,
-                        'prompt': prompt,
-                        'stream': True,
-                        'options': {
-                            'temperature': 0.2,
-                            'num_predict': 4096
-                        }
-                    }
-                    console.print(f"[blue]Sending to Ollama: {data}[/blue]")
-                    async with session.post(
-                        'http://localhost:11434/api/generate',
-                        json=data,
-                        timeout=aiohttp.ClientTimeout(total=1800)  # 30 minute timeout
-                    ) as response:
-                        if response.status != 200:
-                            raise ValueError(f"Ollama API error: {response.status}")
-                        
-                        async for line in response.content:
-                            if line:
-                                try:
-                                    data = json.loads(line)
+                display_manager.add_debug(f"[blue]Sending to Ollama: {data}[/blue]")
+                async with session.post(
+                    'http://localhost:11434/api/generate',
+                    json=data,
+                    timeout=aiohttp.ClientTimeout(total=1800)  # 30 minute timeout
+                ) as response:
+                    if response.status != 200:
+                        raise ValueError(f"Ollama API error: {response.status}")
+                    
+                    async for line in response.content:
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                
+                                if 'response' in data:
+                                    analysis += data['response']
+                                    tokens += 1
                                     
-                                    if 'response' in data:
-                                        analysis += data['response']
-                                        tokens += 1
+                                    # Update progress every few tokens
+                                    if tokens % 10 == 0:
+                                        elapsed = time.time() - start_time
+                                        rate = tokens / elapsed if elapsed > 0 else 0
                                         
-                                        # Update progress every few tokens
-                                        if tokens % 10 == 0:
-                                            elapsed = time.time() - start_time
-                                            rate = tokens / elapsed if elapsed > 0 else 0
-                                            
-                                            # Update status displays
-                                            update_server_status(tokens, rate)
-                                            live.refresh()
-                                            
-                                            # Update progress
-                                            progress.update(
-                                                analysis_task, 
-                                                description=f"[cyan]Generated {tokens} tokens ({rate:.1f}/sec)",
-                                                completed=min(100, tokens * 100 // 4096)  # Assume ~4K tokens total
-                                            )
+                                        # Update status displays
+                                        live.refresh()
+                                        
+                                        # Update progress
+                                        display_manager.progress.update(
+                                            analysis_task, 
+                                            description=f"[cyan]Generated {tokens} tokens ({rate:.1f}/sec)",
+                                            completed=min(100, tokens * 100 // 4096)  # Assume ~4K tokens total
+                                        )
+                                
+                                # Show completion info
+                                if 'done' in data and data['done']:
+                                    if 'total_duration' in data:
+                                        duration_sec = data['total_duration'] / 1_000_000_000
+                                        display_manager.progress.update(
+                                            analysis_task,
+                                            description=f"[green]Analysis complete: {tokens} tokens in {duration_sec:.2f}s ({tokens/duration_sec:.1f}/s)",
+                                            completed=100
+                                        )
+                                    else:
+                                        display_manager.progress.update(analysis_task, completed=100, description=f"[green]Analysis complete: {tokens} tokens")
+                                    break
                                     
-                                    # Show completion info
-                                    if 'done' in data and data['done']:
-                                        if 'total_duration' in data:
-                                            duration_sec = data['total_duration'] / 1_000_000_000
-                                            progress.update(
-                                                analysis_task,
-                                                description=f"[green]Analysis complete: {tokens} tokens in {duration_sec:.2f}s ({tokens/duration_sec:.1f}/s)",
-                                                completed=100
-                                            )
-                                        else:
-                                            progress.update(analysis_task, completed=100, description=f"[green]Analysis complete: {tokens} tokens")
-                                        break
-                                        
-                                except json.JSONDecodeError:
-                                    pass
-                
-            except Exception as e:
-                console.print(f"[yellow]Streaming error: {e}. Falling back to standard API.[/yellow]")
-                # Fallback to standard API
-                response = ollama.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={
-                        "temperature": 0.2,
-                        "num_predict": 4096
-                    }
-                )
-                analysis = response.message.content if hasattr(response, 'message') and hasattr(response.message, 'content') else response["message"]["content"]
-                progress.update(analysis_task, completed=100, description="[green]Analysis complete (non-streaming mode)")
+                            except json.JSONDecodeError:
+                                pass
             
-            # Update final server status
-            update_server_status()
-            live.refresh()
+        except Exception as e:
+            display_manager.add_debug(f"[yellow]Streaming error: {e}. Falling back to standard API.[/yellow]")
+            # Fallback to standard API
+            response = ollama.chat(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                options={
+                    "temperature": 0.2,
+                    "num_predict": 4096
+                }
+            )
+            analysis = response.message.content if hasattr(response, 'message') and hasattr(response.message, 'content') else response["message"]["content"]
+            display_manager.progress.update(analysis_task, completed=100, description="[green]Analysis complete (non-streaming mode)")
+        
+        # Update final server status
+        live.refresh()
 
-            # Step 5: Save the results
-            save_task = progress.add_task("[cyan]Saving analysis results...", total=1)
+        # Step 5: Save the results
+        save_task = display_manager.progress.add_task("[cyan]Saving analysis results...", total=1)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("# Message Timeline Analysis\n\n")
+            f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} using {model_name}*\n\n")
+            f.write(analysis)
+            f.write(f"\n\n---\n\n*Analysis completed in {time.time() - start_time:.2f} seconds*\n\n")
+            f.write("\n\n## Source Material\n\n")
+            f.write(f"- [Raw OCR Data]({os.path.basename(results_file)})\n")
+            f.write(f"- [Basic OCR Summary]({os.path.basename(markdown_path)})\n\n")
+
+            if image_map:
+                f.write("\n## Original Images\n\n")
+                for i, (original_path, copied_path) in enumerate(image_map.items(), 1):
+                    filename = os.path.basename(original_path)
+                    f.write(f"### Image {i}: {filename}\n\n")
+                    f.write(f"![Screenshot]({copied_path})\n\n")
+                    
+        display_manager.progress.update(save_task, completed=1, description=f"[green]Results saved to: {os.path.basename(output_path)}")
+        live.refresh()
+
+        # Clean up if we created our own display
+        if using_local_display:
+            display_task.cancel()
+            try:
+                await asyncio.wait_for(display_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            display_manager.stop()
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
-
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("# Message Timeline Analysis\n\n")
-                f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} using {model_name}*\n\n")
-                f.write(analysis)
-                f.write(f"\n\n---\n\n*Analysis completed in {time.time() - start_time:.2f} seconds*\n\n")
-                f.write("\n\n## Source Material\n\n")
-                f.write(f"- [Raw OCR Data]({os.path.basename(results_file)})\n")
-                f.write(f"- [Basic OCR Summary]({os.path.basename(markdown_path)})\n\n")
-
-                if image_map:
-                    f.write("\n## Original Images\n\n")
-                    for i, (original_path, copied_path) in enumerate(image_map.items(), 1):
-                        filename = os.path.basename(original_path)
-                        f.write(f"### Image {i}: {filename}\n\n")
-                        f.write(f"![Screenshot]({copied_path})\n\n")
-                        
-            progress.update(save_task, completed=1, description=f"[green]Results saved to: {os.path.basename(output_path)}")
-            live.refresh()
-
-        # Show final summary outside of Live display
+        # Show final summary
         elapsed_time = time.time() - start_time
         console.print(f"[green]✓ Analysis completed in {elapsed_time:.2f} seconds[/green]")
         console.print(f"[green]✓ Generated approximately {tokens} tokens[/green]")
         console.print(f"[green]✓ Results saved to: {output_path}[/green]")
 
-        # Open the file if on macOS/Linux
-        os.system(f'open "{output_path}"' if sys.platform == 'darwin' else f'xdg-open "{output_path}"' if sys.platform.startswith('linux') else f'start "" "{output_path}"')
+        # Open the file
+        os.system(f'open "{output_path}"' if sys.platform == 'darwin' else 
+                  f'xdg-open "{output_path}"' if sys.platform.startswith('linux') else 
+                  f'start "" "{output_path}"')
 
     except ImportError:
         console.print("[red]Required packages not installed. Install with: pip install ollama aiohttp psutil[/red]")
     except Exception as e:
         console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]")
         console.print(traceback.format_exc())
+        if using_local_display:
+            display_manager.stop()
 
 def post_process_ocr_text(text: str) -> str:
     """Clean up OCR text for better readability"""
@@ -1232,216 +1240,6 @@ def config_menu(config: Dict[str, Any]) -> Dict[str, Any]:
     
     return config
 
-async def analyze_with_ollama(results_file: str, output_dir: str):
-    """Analyze OCR results with Ollama using the selected model"""
-    try:
-        import ollama
-        import aiohttp
-        import json
-
-        console.print("[cyan]Connecting to Ollama server...[/cyan]")
-
-        with open(results_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            results = data.get("results", [])
-
-        file_paths = [result.get("file_path") for result in results if "file_path" in result]
-        
-        # Create progress display for multiple steps
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(complete_style="cyan", finished_style="green"),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
-            # Step 1: Create summary and copy images
-            copy_task = progress.add_task("[cyan]Creating output resources...", total=2)
-            
-            progress.update(copy_task, description="[cyan]Copying images to output directory...")
-            image_map = copy_images_to_output(file_paths, output_dir)
-            progress.update(copy_task, advance=1)
-
-            progress.update(copy_task, description="[cyan]Creating markdown summary...")
-            markdown_path = await create_markdown_summary(results, results_file, image_map)
-            progress.update(copy_task, advance=1, description="[green]Resources created")
-            console.print(f"[green]✓ Created initial markdown summary: {markdown_path}[/green]")
-
-            # Step 2: Prepare the prompt
-            prompt_task = progress.add_task("[cyan]Building analysis prompt...", total=1)
-            
-            # Read postprompt.txt if it exists
-            post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
-            post_prompt = ""
-            has_custom_prompt = False
-            if os.path.exists(post_prompt_file):
-                try:
-                    with open(post_prompt_file, 'r', encoding='utf-8') as f:
-                        post_prompt = f.read()
-                    if post_prompt.strip():
-                        has_custom_prompt = True
-                        console.print(f"[green]✓ Loaded custom prompt from {post_prompt_file}[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Error reading postprompt.txt: {str(e)}[/yellow]")
-            else:
-                console.print(f"[blue]Using default prompt only (no postprompt.txt found)[/blue]")
-
-            # Generate the prompt with simplified data and post-prompt
-            simplified_data = []
-            for result in results:
-                simplified_entry = {
-                    "filename": result.get("filename", "unknown"),
-                    "text": result.get("text", ""),
-                }
-                if "date" in result:
-                    simplified_entry["date"] = result["date"]
-                if "sender" in result:
-                    simplified_entry["sender"] = result["sender"]
-                simplified_data.append(simplified_entry)
-
-            prompt = ANALYSIS_PROMPT + "\n\nHere's the OCR data extracted from screenshots:\n"
-            prompt += json.dumps(simplified_data, indent=2)
-            
-            if post_prompt:
-                prompt += "\n\n" + post_prompt
-            
-            progress.update(prompt_task, completed=1, description="[green]Prompt prepared")
-            
-            # Step 3: Set up the model
-            config = load_config()
-            model_name = config.get("selected_model", "yarn-llama2")
-            model_task = progress.add_task(f"[cyan]Setting up model: {model_name}...", total=1)
-
-            try:
-                models = ollama.list()
-                model_names = [m.model for m in models if hasattr(m, 'model')]
-
-                if model_name not in model_names:
-                    progress.update(model_task, description=f"[yellow]Pulling {model_name}...")
-                    ollama.pull(model_name)
-                progress.update(model_task, completed=1, description=f"[green]Model {model_name} ready")
-            except Exception as e:
-                console.print(f"[yellow]Error checking models, will try to use {model_name} directly: {str(e)}[/yellow]")
-                progress.update(model_task, completed=1, description=f"[yellow]Model status unknown")
-
-            # Step 4: Monitor the Ollama server in a separate task
-            monitor_task = progress.add_task("[cyan]Monitoring Ollama...", total=None)
-            
-            # Start a separate task to monitor Ollama status
-            monitor_stop_event = asyncio.Event()
-            monitoring_task = asyncio.create_task(
-                monitor_ollama_status(monitor_task, progress, monitor_stop_event)
-            )
-
-            # Step 5: Run the analysis
-            console.print(f"[cyan]Analyzing text with {model_name}...[/cyan]")
-            start_time = time.time()
-            analysis_task = progress.add_task(f"[cyan]Analyzing with {model_name}...", total=100)
-
-            # Try to use streaming if available
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        'http://localhost:11434/api/generate',
-                        json={
-                            'model': model_name,
-                            'prompt': prompt,
-                            'stream': True,
-                            'options': {
-                                'temperature': 0.2,
-                                'num_predict': 4096
-                            }
-                        },
-                        timeout=aiohttp.ClientTimeout(total=1200)  # 20 minute timeout
-                    ) as response:
-                        if response.status != 200:
-                            # Fallback to non-streaming approach if streaming fails
-                            raise ValueError("Streaming not supported or failed")
-                            
-                        analysis = ""
-                        tokens = 0
-                        start_time = time.time()
-                        
-                        async for line in response.content:
-                            if line:
-                                try:
-                                    data = json.loads(line)
-                                    if 'response' in data:
-                                        analysis += data['response']
-                                        tokens += 1
-                                        
-                                        # Update progress every few tokens
-                                        if tokens % 10 == 0:
-                                            elapsed = time.time() - start_time
-                                            rate = tokens / elapsed if elapsed > 0 else 0
-                                            remaining = int(4000 / rate) - int(elapsed) if rate > 0 else "?"
-                                            progress.update(
-                                                analysis_task, 
-                                                description=f"[cyan]Generated {tokens} tokens ({rate:.1f}/sec)",
-                                                completed=min(100, tokens * 100 // 4000)
-                                            )
-                                    
-                                    if 'done' in data and data['done']:
-                                        progress.update(analysis_task, completed=100, description=f"[green]Analysis complete ({tokens} tokens)")
-                                        break
-                                        
-                                except json.JSONDecodeError:
-                                    pass
-                            
-            except Exception as e:
-                console.print(f"[yellow]Streaming error: {e}. Falling back to standard API.[/yellow]")
-                # Fallback to standard API
-                response = ollama.chat(
-                    model=model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={
-                        "temperature": 0.2,
-                        "num_predict": 4096
-                    }
-                )
-                analysis = response.message.content if hasattr(response, 'message') and hasattr(response.message, 'content') else response["message"]["content"]
-                progress.update(analysis_task, completed=100, description="[green]Analysis complete")
-
-            # Stop the monitoring task
-            monitor_stop_event.set()
-            await monitoring_task
-
-            # Step 6: Save the results
-            save_task = progress.add_task("[cyan]Saving analysis results...", total=1)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_path = os.path.join(output_dir, f"timeline_analysis_{timestamp}.md")
-
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("# Message Timeline Analysis\n\n")
-                f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')} using {model_name}*\n\n")
-                f.write(analysis)
-                f.write("\n\n## Source Material\n\n")
-                f.write(f"- [Raw OCR Data]({os.path.basename(results_file)})\n")
-                f.write(f"- [Basic OCR Summary]({os.path.basename(markdown_path)})\n\n")
-
-                if image_map:
-                    f.write("\n## Original Images\n\n")
-                    for i, (original_path, copied_path) in enumerate(image_map.items(), 1):
-                        filename = os.path.basename(original_path)
-                        f.write(f"### Image {i}: {filename}\n\n")
-                        f.write(f"![Screenshot]({copied_path})\n\n")
-                        
-            progress.update(save_task, completed=1, description="[green]Results saved")
-
-        elapsed_time = time.time() - start_time
-        console.print(f"[green]✓ Analysis completed in {elapsed_time:.2f} seconds[/green]")
-        console.print(f"[green]✓ Results saved to: {output_path}[/green]")
-
-        os.system(f'open "{output_path}"')
-
-    except ImportError:
-        console.print("[red]Required packages not installed. Install with: pip install ollama aiohttp[/red]")
-    except Exception as e:
-        console.print(f"[bold red]Error during analysis: {str(e)}[/bold red]")
-        import traceback
-        console.print(traceback.format_exc())
-
 def get_available_models() -> List[str]:
     """Get available models from Ollama with improved error handling"""
     try:
@@ -1556,6 +1354,9 @@ async def main():
         output_dir = config.get("output_directory", DEFAULT_OUTPUT_DIR)
         lang = config.get("last_language", "eng")
         
+        # Create a single display manager for the entire process
+        display_manager = DisplayManager()
+        
         while True:
             console.print("\n[bold cyan]Menu Options:[/bold cyan]")
             console.print("  1. Process all images in directory")
@@ -1580,7 +1381,7 @@ async def main():
                     continue
                 
                 # Show processing details
-                model_name = config.get("selected_model", "yarn-llama2")
+                model_name = get_current_model()
                 post_prompt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "postprompt.txt")
                 has_custom_prompt = os.path.exists(post_prompt_file) and os.path.getsize(post_prompt_file) > 0
                 
@@ -1597,18 +1398,30 @@ async def main():
                     console.print("[yellow]Processing cancelled.[/yellow]")
                     continue
                 
-                results = await process_images(file_paths, lang)
-                
-                if not results:
-                    console.print("[yellow]No results extracted.[/yellow]")
-                    continue
-                
-                results_file = await save_results(results, output_dir)
-                console.print(f"[green]OCR results saved to: {results_file}[/green]")
-                
-                console.print(display_result_summary(results))
-                
-                await analyze_with_ollama(results_file, output_dir)
+                with display_manager.start() as live:
+                    display_task = await display_manager.start_display_updater()
+                    
+                    try:
+                        # Process images with shared display manager
+                        results = await process_images(file_paths, lang, display_manager)
+                        
+                        if not results:
+                            display_manager.add_debug("[yellow]No results extracted.[/yellow]")
+                            continue
+                        
+                        # Save results
+                        results_file = await save_results(results, output_dir)
+                        display_manager.add_debug(f"[green]OCR results saved to: {results_file}[/green]")
+                        
+                        # Continue to analysis with the same display manager
+                        await analyze_with_ollama(results_file, output_dir, display_manager)
+                    finally:
+                        # Clean up display
+                        display_task.cancel()
+                        try:
+                            await asyncio.wait_for(display_task, timeout=1.0)
+                        except (asyncio.CancelledError, asyncio.TimeoutError):
+                            pass
             
             elif choice == "2":
                 config = config_menu(config)
