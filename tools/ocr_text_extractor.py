@@ -93,7 +93,18 @@ class DisplayManager:
         plain_msg = Text.from_markup(msg).plain
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.debug_messages.append(f"{timestamp} {plain_msg}")
-        self.layout["main"].update(Panel(Text("\n".join(self.debug_messages[-10:])), title="Debug Output"))
+        
+        # Keep last 30 messages instead of 10
+        debug_text = Text("\n".join(self.debug_messages[-30:]))
+        
+        # Create a panel with expanded height
+        debug_panel = Panel(
+            debug_text,
+            title="Debug Output",
+            expand=True  # Make panel expand to fill available space
+        )
+        
+        self.layout["main"].update(debug_panel)
         if self.live:
             self.live.refresh()
             
@@ -333,7 +344,9 @@ async def clean_text_with_ollama(
         if display_manager:
             display_manager.add_debug("[blue]Ollama OCR cleanup: Initiating cleanup process...[/blue]")
         
-        prompt = f"You are a helpful assistant. Clean up this OCR text:\n\n{text}\n\nCleaned text:"
+        prompt = f"You are a helpful assistant who can make sense of cryptic text. Noting that OCR often mistakes characters and words which you should be able to detect and fix. \
+            Clean up this OCR text so that it reads like proper language with correct grammar and is true to the original intent.\
+            Remove extraneous characters. Here it is:\n\n{text}\n\nCleaned text:"
         
         try:
             start_time = time.time()
@@ -511,7 +524,7 @@ async def process_images(file_paths: List[str], lang: str = "eng",
         
         for file_path in file_paths:
             filename = os.path.basename(file_path)
-            display_manager.add_debug(f"[blue]Processing {filename}...[/blue]")
+            display_manager.add_debug(f"[blue]Now Processing {filename}...[/blue]")
             
             # Add subtasks for better tracking
             ocr_task = display_manager.detail_progress.add_task(
@@ -548,7 +561,6 @@ async def process_images(file_paths: List[str], lang: str = "eng",
                 results.append(result)
                 
                 # Update status
-                await display_manager.update_status("Processing", f"Processing {filename}")
                 await display_manager.update_status("Progress", f"Completed {len(results)}/{len(file_paths)}")
                 
             except Exception as e:
