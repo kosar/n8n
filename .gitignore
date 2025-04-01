@@ -5,3 +5,5 @@ test_content/
 node_modules
 documentation/
 postprompt.txt
+pdf_extractor_venv/
+.requirements_installed
