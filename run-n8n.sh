@@ -1,11 +1,16 @@
 #!/bin/bash
 
+# Add debug mode flag at the top with other variables
+DEBUG_MODE=false
+SILENT_MODE=false
+
 RECOMMENDED_NODE_VERSION="18.17.0"
 ACCEPTABLE_VERSIONS=("18" "20" "22")
 OLLAMA_API_URL="http://localhost:11434/api"
 N8N_PORT=5678
 N8N_URL="http://localhost:$N8N_PORT"
 N8N_DIR=$(dirname "$0")
+LOG_FILE="$N8N_DIR/run-n8n-debug.log" # Define log file path
 
 # Global variables to store system status
 STATUS_NODEJS=""
@@ -27,6 +32,13 @@ N8N_PID=""
 # Add n8n installation status tracking
 N8N_DATA_DIR="$HOME/.n8n"
 STATUS_N8N_INSTALLED=false
+
+# Add these environment variables at the top of the file, after the existing variables
+export N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+export N8N_RUNNERS_ENABLED=true
+export N8N_USER_MANAGEMENT_DISABLED=true
+export N8N_BASIC_AUTH_ACTIVE=false
+export N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true
 
 # Function to find and source nvm
 load_nvm() {
@@ -205,58 +217,120 @@ system_status_scan() {
 
 # Function to display system status in compact dashboard format
 display_system_status() {
-  clear
-  echo "========================================================"
-  echo "               n8n System Status Dashboard               "
-  echo "========================================================"
-  echo ""
-  echo "SYSTEM COMPONENTS:"
-  printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
-  printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
-  printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
-  printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
-  printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
-  printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
-  
-  echo ""
-  echo "N8N STATUS:"
-  printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
-  if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
-    printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
-  fi
-  
-  echo ""
-  echo "AI ASSISTANT STATUS:"
-  printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
-  printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
-  printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
-  
-  # Display model list if any models are available
-  if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+  if [ "$DEBUG_MODE" = true ] || [ "$SILENT_MODE" = true ]; then
+    echo "========================================================"
+    echo "               n8n System Status Dashboard               "
+    echo "========================================================"
     echo ""
-    echo "  Available Ollama models:"
-    local count=0
-    for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
-      printf "    • %s\n" "$model"
-      ((count++))
-      # After showing 10 models, summarize the rest
-      if [ $count -eq 10 ] && [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 10 ]; then
-        remaining=$((${#STATUS_OLLAMA_MODEL_LIST[@]} - 10))
-        printf "    • ... and %d more model(s)\n" "$remaining"
-        break
-      fi
-    done
+    echo "SYSTEM COMPONENTS:"
+    printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+    printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+    printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+    printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+    printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+    printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+    
+    echo ""
+    echo "N8N STATUS:"
+    printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+    if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+      printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+    fi
+    
+    echo ""
+    echo "AI ASSISTANT STATUS:"
+    printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+    printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+    printf "  %-15s %s\n" "Ollama URL:" "http://localhost:11434"
+    
+    # Test Ollama endpoint explicitly
+    echo "  Testing Ollama endpoint..."
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      echo "  ✅ Ollama API is responding"
+    else
+      echo "  ❌ Ollama API is not responding"
+    fi
+    
+    printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+    
+    # Display model list if any models are available
+    if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+      echo ""
+      echo "  Available Ollama models:"
+      for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+        printf "    • %s\n" "$model"
+      done
+    fi
+    
+    echo ""
+    echo "TIMESTAMP:"
+    printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+    echo ""
+    echo "========================================================"
+  else
+    clear
+    echo "========================================================"
+    echo "               n8n System Status Dashboard               "
+    echo "========================================================"
+    echo ""
+    echo "SYSTEM COMPONENTS:"
+    printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+    printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+    printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+    printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+    printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+    printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+    
+    echo ""
+    echo "N8N STATUS:"
+    printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+    if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+      printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+    fi
+    
+    echo ""
+    echo "AI ASSISTANT STATUS:"
+    printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+    printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+    printf "  %-15s %s\n" "Ollama URL:" "http://localhost:11434"
+    
+    # Test Ollama endpoint explicitly
+    echo "  Testing Ollama endpoint..."
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      echo "  ✅ Ollama API is responding"
+    else
+      echo "  ❌ Ollama API is not responding"
+    fi
+    
+    printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+    
+    # Display model list if any models are available
+    if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+      echo ""
+      echo "  Available Ollama models:"
+      local count=0
+      for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+        printf "    • %s\n" "$model"
+        ((count++))
+        # After showing 10 models, summarize the rest
+        if [ $count -eq 10 ] && [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 10 ]; then
+          remaining=$((${#STATUS_OLLAMA_MODEL_LIST[@]} - 10))
+          printf "    • ... and %d more model(s)\n" "$remaining"
+          break
+        fi
+      done
+    fi
+    
+    echo ""
+    echo "TIMESTAMP:"
+    printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+    echo ""
+    echo "========================================================"
+    echo ""
+    echo "Press Enter to return to menu..."
+    read -r
+    show_interactive_menu
   fi
-  
-  echo ""
-  echo "TIMESTAMP:"
-  printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
-  echo ""
-  echo "========================================================"
-  echo ""
-  echo "Press Enter to return to menu..."
-  read -r
-  show_interactive_menu
 }
 
 # Function to check if version is supported
@@ -547,88 +621,167 @@ git_prep() {
   echo "- Other source code files"
 }
 
-# Function to show help
+# Function to show help message
 show_help() {
-  echo "Usage: ./run-n8n.sh [options]"
+  echo "n8n Launcher Script"
+  echo "------------------"
+  echo ""
+  echo "Usage:"
+  echo "  ./run-n8n.sh [options]"
   echo ""
   echo "Options:"
-  echo "  --make-it-work         Auto-fix Node.js version and start n8n"
-  echo "  --clean-locks          Remove all package-lock.json files"
-  echo "  --regen-locks          Regenerate all package-lock.json files"
-  echo "  --git-prep             Thoroughly clean up all generated files for git commit"
-  echo "  --update-n8n           Update n8n to the latest version"
-  echo "  --cleanup              Run n8n cleanup and optimization"
-  echo "  --reset-installation   Reset n8n installation (⚠️ DELETES ALL DATA)"
-  echo "  --help                 Show this help message"
-}
-
-# Just make it work mode
-just_make_it_work() {
-  echo "🚀 'Just make it work' mode activated!"
-  
-  # Handle Node.js version
-  if ! load_nvm; then
-    echo "❌ Could not find or load nvm."
-    echo "Installing nvm automatically..."
-    
-    # Try to install nvm
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
-    
-    # Try to load the newly installed nvm
-    export NVM_DIR="$HOME/.nvm"
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    
-    if ! command -v nvm &>/dev/null; then
-      echo "❌ Failed to install nvm automatically."
-      echo "Please install nvm manually: https://github.com/nvm-sh/nvm#installing-and-updating"
-      exit 1
-    fi
-  fi
-  
-  # Now that nvm is loaded, install and use the recommended version
-  echo "📦 Installing Node.js $RECOMMENDED_NODE_VERSION..."
-  nvm install $RECOMMENDED_NODE_VERSION
-  
-  echo "🔄 Switching to Node.js $RECOMMENDED_NODE_VERSION..."
-  nvm use $RECOMMENDED_NODE_VERSION
-  
-  # Verify the version
-  NODE_VERSION=$(node -v)
-  echo "✅ Now using Node.js $NODE_VERSION"
-  
-  # Check Ollama status
+  echo "  --make-it-work    Start n8n with automatic configuration"
+  echo "  --debug          Run in debug mode (no menus, direct output)"
+  echo "  --silent         Run in silent mode (no menus, just make it work)"
+  echo "  --help           Show this help message"
   echo ""
-  echo "🔍 Checking Ollama status..."
-  check_ollama_installed
-  ollama_installed=$?
-  
-  if [ $ollama_installed -eq 0 ]; then
-    check_ollama_running
-    ollama_running=$?
-    
-    if (ollama_running -eq 0); then
-      list_ollama_models
-      configure_n8n_for_ollama
-    else
-      echo ""
-      echo "⚠️  You'll need to start Ollama before using AI features in n8n:"
-      echo "   1. Open a new terminal"
-      echo "   2. Run: ollama serve"
-      echo "   3. Return to n8n to configure AI settings"
-    fi
-  fi
-  
-  # Start n8n with control menu instead of waiting for process
-  start_n8n_with_control_menu
+  echo "Note: This script requires Ollama to be running. Use run-ollama.sh to manage Ollama:"
+  echo "  ./run-ollama.sh start    # Start Ollama server"
+  echo "  ./run-ollama.sh pull     # Download models"
+  echo "  ./run-ollama.sh status   # Check Ollama status"
+  echo ""
+  echo "Debug Mode:"
+  echo "  The --debug option runs the script without menus and displays"
+  echo "  all output directly to stdout. This is useful for troubleshooting"
+  echo "  and seeing exactly what the script is doing."
+  echo ""
+  echo "Silent Mode:"
+  echo "  The --silent option runs the script without menus and follows"
+  echo "  the 'just make it work' path, displaying output directly to stdout."
+  echo "  This is useful for automated or non-interactive usage."
+  echo ""
+  echo "Example:"
+  echo "  ./run-n8n.sh --debug"
+  echo "  ./run-n8n.sh --silent"
+  echo ""
+  exit 0
 }
 
-# Function to show an interactive menu (compact version)
+# Function to install Ollama
+install_ollama() {
+  echo "📦 Installing Ollama..."
+  
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    if command -v brew &>/dev/null; then
+      brew install ollama
+    else
+      echo "❌ Homebrew not found. Installing Homebrew first..."
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      brew install ollama
+    fi
+  elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    # Linux
+    curl -fsSL https://ollama.com/install.sh | sh
+  else
+    echo "❌ Unsupported operating system"
+    echo "Please install Ollama manually from: https://ollama.ai/download"
+    return 1
+  fi
+  
+  # Verify installation
+  if command -v ollama &>/dev/null; then
+    echo "✅ Ollama installed successfully"
+    return 0
+  else
+    echo "❌ Failed to install Ollama"
+    return 1
+  fi
+}
+
+# Function to start Ollama service
+start_ollama_service() {
+  echo "🚀 Starting Ollama service (logging to $LOG_FILE)..."
+  
+  # Check if Ollama is already running
+  if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+    echo "✅ Ollama service is already running"
+    return 0
+  fi
+  
+  # Start Ollama in the background, redirecting output to log file
+  ollama serve >> "$LOG_FILE" 2>&1 &
+  OLLAMA_PID=$!
+  
+  # Wait for service to start
+  local max_attempts=30
+  local attempt=1
+  while [ $attempt -le $max_attempts ]; do
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      echo "✅ Ollama service started successfully"
+      return 0
+    fi
+    echo "⏳ Waiting for Ollama service to start... ($attempt/$max_attempts)"
+    sleep 1
+    ((attempt++))
+  done
+  
+  echo "❌ Failed to start Ollama service"
+  return 1
+}
+
+# Function to download Ollama model
+download_ollama_model() {
+  local model_name=$1
+  
+  echo "📥 Downloading Ollama model: $model_name"
+  
+  # Check if model is already downloaded
+  if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" | grep -q "\"name\":\"$model_name\""; then
+    echo "✅ Model $model_name is already downloaded"
+    return 0
+  fi
+  
+  # Download the model
+  ollama pull "$model_name"
+  
+  # Verify download
+  if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" | grep -q "\"name\":\"$model_name\""; then
+    echo "✅ Model $model_name downloaded successfully"
+    return 0
+  else
+    echo "❌ Failed to download model $model_name"
+    return 1
+  fi
+}
+
+# Function to ensure Ollama is ready
+ensure_ollama_ready() {
+  echo "🔍 Checking Ollama availability..."
+  
+  # Check if Ollama is installed
+  if ! command -v ollama &>/dev/null; then
+    echo "❌ Ollama is not installed"
+    echo "Please install Ollama first using: ./run-ollama.sh start"
+    return 1
+  fi
+  
+  # Check if Ollama server is running
+  if ! curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+    echo "❌ Ollama server is not running"
+    echo "Please start Ollama first using: ./run-ollama.sh start"
+    return 1
+  fi
+  
+  # Check if any models are available
+  local models_json=$(curl -s --max-time 2 "${OLLAMA_API_URL}/tags")
+  if [ -z "$models_json" ] || ! echo "$models_json" | grep -q "\"models\""; then
+    echo "⚠️ No models found in Ollama"
+    echo "Please download a model using: ./run-ollama.sh pull mistral"
+    return 1
+  fi
+  
+  echo "✅ Ollama is ready"
+  return 0
+}
+
+# Inserting show_interactive_menu function definition here
 show_interactive_menu() {
   # Run system scan if it hasn't been run yet
   if [ -z "$STATUS_LAST_SCAN" ]; then
-    system_status_scan > /dev/null 2>&1
+    system_status_scan >> "$LOG_FILE" 2>&1 # Log scan output
   fi
-  
+
   clear
   echo "╔══════════════════ n8n Launcher Menu ═══════════════════╗"
   echo "║                                                        ║"
@@ -645,18 +798,18 @@ show_interactive_menu() {
   echo "║  0) ❌ Exit                                            ║"
   echo "║                                                        ║"
   echo "╚════════════════════════════════════════════════════════╝"
-  
+
   # Show mini status summary with n8n version info
   echo ""
   echo -n "System Status: Node.js ${STATUS_NODEJS:3:30} | "
-  
+
   # Show n8n version with update info if available
   if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
     echo "n8n ${STATUS_N8N:3:20} (${STATUS_N8N_UPDATE})"
   else
     echo "n8n ${STATUS_N8N:3:30}"
   fi
-  
+
   echo ""
   echo -n "Enter your choice [0-10]: "
   read -r choice
@@ -664,7 +817,7 @@ show_interactive_menu() {
   case $choice in
     1) echo "Starting n8n with Node.js version check..."; run_normal_flow ;;
     2) echo "Activating 'Just Make It Work' mode..."; just_make_it_work ;;
-    3) 
+    3)
       echo "Cleaning package-lock.json files..."
       clean_package_locks
       echo -n "Press Enter to return to menu..."
@@ -728,41 +881,22 @@ show_interactive_menu() {
   esac
 }
 
-# Function to run the normal execution flow with automatic Node.js version fix
-run_normal_flow() {
-  # Check current Node.js version
-  CURRENT_VERSION=$(node -v 2>/dev/null | sed 's/v//')
+# Modify the just_make_it_work function
+just_make_it_work() {
+  echo "🚀 'Just make it work' mode activated!"
 
-  # Check if current version is supported
-  if ! is_supported_version "$CURRENT_VERSION"; then
-    echo "Node.js $CURRENT_VERSION is not supported. Switching to compatible version..."
-    
-    # Try to load nvm
-    if load_nvm; then
-      # Use the recommended Node.js version
-      echo "Using nvm to switch to Node.js $RECOMMENDED_NODE_VERSION..."
-      
-      # Try to use existing installation first
-      if ! nvm use $RECOMMENDED_NODE_VERSION &>/dev/null; then
-        # If not installed, install it
-        echo "Installing Node.js $RECOMMENDED_NODE_VERSION..."
-        nvm install $RECOMMENDED_NODE_VERSION
-        nvm use $RECOMMENDED_NODE_VERSION
-      fi
-      
-      # Verify the version
-      NODE_VERSION=$(node -v)
-      echo "Now using Node.js $NODE_VERSION"
-    else
-      echo "Could not find nvm. Please select 'Just Make It Work' option instead."
-      echo "Press Enter to return to menu..."
-      read -r
-      show_interactive_menu
-      return
-    fi
-  else
-    echo "Using Node.js $CURRENT_VERSION"
-  fi
+  # Force kill any lingering n8n processes
+  echo "🛑 Stopping any existing n8n processes..."
+  pkill -f "n8n start" || true
+  sleep 1
+
+  # Ensure the .n8n directory exists and is clean
+  echo "⚙️ Ensuring n8n directory permissions and cleaning config..."
+  rm -f "$HOME/.n8n/config"
+  echo "Config file deleted status: $? (0 means success)"
+  mkdir -p "$HOME/.n8n"
+  chmod 700 "$HOME/.n8n"
+  echo "✅ n8n directory permissions set and config cleaned."
 
   # Check Ollama status before starting n8n
   echo ""
@@ -790,153 +924,226 @@ run_normal_flow() {
   start_n8n_with_control_menu
 }
 
-# Function to start n8n and show control menu
+# Function to start n8n with control menu
 start_n8n_with_control_menu() {
-  # Start n8n in the background
-  echo "🚀 Starting n8n..."
-  n8n start &
-  N8N_PID=$!
-  N8N_RUNNING=true
-  
-  # Wait a moment for n8n to start
-  sleep 2
-  
-  # Open in browser
-  open_n8n_in_browser
-  
-  # Show control menu
-  show_n8n_control_menu
-}
-
-# Function to show the n8n control menu while n8n is running
-show_n8n_control_menu() {
-  clear
-  echo "╔══════════════════ n8n Control Panel ════════════════════╗"
-  echo "║                                                         ║"
-  echo "║  n8n server is running in the background                ║"
-  echo "║  Web UI is available at: $N8N_URL                  ║"
-  echo "║                                                         ║"
-  echo "╚═════════════════════════════════════════════════════════╝"
-  echo ""
-  echo "Options:"
-  echo "1) 🔄 Refresh browser"
-  echo "2) 🔍 View system status"
-  echo "0) ⏹️  Stop n8n and return to main menu"
-  echo ""
-  echo -n "Enter your choice [0-2]: "
-  read -r control_choice
-
-  case $control_choice in
-    1)
-      echo "Reopening n8n in browser..."
-      open_n8n_in_browser
-      show_n8n_control_menu
-      ;;
-    2)
-      echo "Refreshing system status..."
-      system_status_scan
-      display_system_status_while_running
-      ;;
-    0)
-      echo "Stopping n8n server..."
-      stop_n8n
-      echo "Returning to main menu..."
-      show_interactive_menu
-      ;;
-    *)
-      echo "Invalid choice. Press Enter to try again..."
-      read -r
-      show_n8n_control_menu
-      ;;
-  esac
+  if [ "$DEBUG_MODE" = true ] || [ "$SILENT_MODE" = true ]; then
+    echo "Starting n8n in ${DEBUG_MODE:+debug}${SILENT_MODE:+silent} mode..."
+    echo "----------------------------------------"
+    echo "Environment variables:"
+    echo "N8N_AI_ENABLED=true"
+    echo "N8N_AI_PROVIDER=ollama"
+    echo "N8N_AI_OLLAMA_BASE_URL=http://localhost:11434"
+    echo "----------------------------------------"
+    
+    # Start n8n with environment variables
+    export N8N_AI_ENABLED=true
+    export N8N_AI_PROVIDER=ollama
+    export N8N_AI_OLLAMA_BASE_URL=http://localhost:11434
+    
+    # Start n8n in the background
+    n8n start &
+    N8N_PID=$!
+    
+    # Wait for n8n to start
+    echo "Waiting for n8n to start..."
+    sleep 5
+    
+    # Check if n8n is running
+    if kill -0 $N8N_PID 2>/dev/null; then
+      echo "n8n started successfully with PID: $N8N_PID"
+      echo "n8n URL: http://localhost:5678"
+      echo "----------------------------------------"
+      echo "Press Ctrl+C to stop n8n"
+      
+      # Keep the script running and show status
+      while true; do
+        system_status_scan
+        display_system_status_while_running
+        sleep 5
+      done
+    else
+      echo "Failed to start n8n"
+      exit 1
+    fi
+  else
+    # Original interactive menu version
+    echo "Starting n8n with control menu..."
+    echo "----------------------------------------"
+    echo "Environment variables:"
+    echo "N8N_AI_ENABLED=true"
+    echo "N8N_AI_PROVIDER=ollama"
+    echo "N8N_AI_OLLAMA_BASE_URL=http://localhost:11434"
+    echo "----------------------------------------"
+    
+    # Start n8n with environment variables
+    export N8N_AI_ENABLED=true
+    export N8N_AI_PROVIDER=ollama
+    export N8N_AI_OLLAMA_BASE_URL=http://localhost:11434
+    
+    # Start n8n in the background
+    n8n start &
+    N8N_PID=$!
+    
+    # Wait for n8n to start
+    echo "Waiting for n8n to start..."
+    sleep 5
+    
+    # Check if n8n is running
+    if kill -0 $N8N_PID 2>/dev/null; then
+      echo "n8n started successfully with PID: $N8N_PID"
+      echo "n8n URL: http://localhost:5678"
+      echo "----------------------------------------"
+      echo "Press Ctrl+C to stop n8n"
+      
+      # Keep the script running and show status
+      while true; do
+        system_status_scan
+        display_system_status_while_running
+        sleep 5
+      done
+    else
+      echo "Failed to start n8n"
+      exit 1
+    fi
+  fi
 }
 
 # Function to display system status while n8n is running
 display_system_status_while_running() {
-  clear
-  echo "========================================================"
-  echo "               n8n System Status Dashboard               "
-  echo "========================================================"
-  echo ""
-  echo "SYSTEM COMPONENTS:"
-  printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
-  printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
-  printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
-  printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
-  printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
-  printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
-  
-  echo ""
-  echo "N8N STATUS:"
-  printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
-  if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
-    printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
-  fi
-  
-  echo ""
-  echo "AI ASSISTANT STATUS:"
-  printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
-  printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
-  printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
-  
-  # Display model list if any models are available
-  if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+  if [ "$DEBUG_MODE" = true ] || [ "$SILENT_MODE" = true ]; then
+    echo "========================================================"
+    echo "               n8n System Status Dashboard               "
+    echo "========================================================"
     echo ""
-    echo "  Available Ollama models:"
-    local count=0
-    for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
-      printf "    • %s\n" "$model"
-      ((count++))
-      # After showing 10 models, summarize the rest
-      if [ $count -eq 10 ] && [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 10 ]; then
-        remaining=$((${#STATUS_OLLAMA_MODEL_LIST[@]} - 10))
-        printf "    • ... and %d more model(s)\n" "$remaining"
-        break
-      fi
-    done
+    echo "SYSTEM COMPONENTS:"
+    printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+    printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+    printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+    printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+    printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+    printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+    
+    echo ""
+    echo "N8N STATUS:"
+    printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+    if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+      printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+    fi
+    
+    echo ""
+    echo "AI ASSISTANT STATUS:"
+    printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+    printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+    printf "  %-15s %s\n" "Ollama URL:" "http://localhost:11434"
+    
+    # Test Ollama endpoint explicitly
+    echo "  Testing Ollama endpoint..."
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      echo "  ✅ Ollama API is responding"
+    else
+      echo "  ❌ Ollama API is not responding"
+    fi
+    
+    printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+    
+    # Display model list if any models are available
+    if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+      echo ""
+      echo "  Available Ollama models:"
+      for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+        printf "    • %s\n" "$model"
+      done
+    fi
+    
+    echo ""
+    echo "N8N SERVICE:"
+    printf "  %-15s %s\n" "n8n Server:" "✅ Running (PID: $N8N_PID)"
+    printf "  %-15s %s\n" "n8n URL:" "$N8N_URL"
+    
+    echo ""
+    echo "TIMESTAMP:"
+    printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+    echo ""
+    echo "========================================================"
+  else
+    clear
+    echo "========================================================"
+    echo "               n8n System Status Dashboard               "
+    echo "========================================================"
+    echo ""
+    echo "SYSTEM COMPONENTS:"
+    printf "  %-15s %s\n" "Node.js:" "$STATUS_NODEJS"
+    printf "  %-15s %s\n" "nvm:" "$STATUS_NVM"
+    printf "  %-15s %s\n" "Chrome:" "$STATUS_CHROME"
+    printf "  %-15s %s\n" "curl:" "$STATUS_CURL"
+    printf "  %-15s %s\n" "jq:" "$STATUS_JQ"
+    printf "  %-15s %s\n" "Internet:" "$STATUS_INTERNET"
+    
+    echo ""
+    echo "N8N STATUS:"
+    printf "  %-15s %s\n" "n8n:" "$STATUS_N8N"
+    if [[ "$STATUS_N8N_UPDATE" != "current" && "$STATUS_N8N_UPDATE" != "unknown" && "$STATUS_N8N_UPDATE" != "not installed" ]]; then
+      printf "  %-15s %s\n" "Update:" "$STATUS_N8N_UPDATE"
+    fi
+    
+    echo ""
+    echo "AI ASSISTANT STATUS:"
+    printf "  %-15s %s\n" "Ollama:" "$STATUS_OLLAMA"
+    printf "  %-15s %s\n" "Ollama Server:" "$STATUS_OLLAMA_RUNNING"
+    printf "  %-15s %s\n" "Ollama URL:" "http://localhost:11434"
+    
+    # Test Ollama endpoint explicitly
+    echo "  Testing Ollama endpoint..."
+    if curl -s --max-time 2 "${OLLAMA_API_URL}/tags" &>/dev/null; then
+      echo "  ✅ Ollama API is responding"
+    else
+      echo "  ❌ Ollama API is not responding"
+    fi
+    
+    printf "  %-15s %s\n" "Ollama Models:" "$STATUS_OLLAMA_MODELS"
+    
+    # Display model list if any models are available
+    if [ ${#STATUS_OLLAMA_MODEL_LIST[@]} -gt 0 ]; then
+      echo ""
+      echo "  Available Ollama models:"
+      for model in "${STATUS_OLLAMA_MODEL_LIST[@]}"; do
+        printf "    • %s\n" "$model"
+      done
+    fi
+    
+    echo ""
+    echo "N8N SERVICE:"
+    printf "  %-15s %s\n" "n8n Server:" "✅ Running (PID: $N8N_PID)"
+    printf "  %-15s %s\n" "n8n URL:" "$N8N_URL"
+    
+    echo ""
+    echo "TIMESTAMP:"
+    printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
+    echo ""
+    echo "========================================================"
+    echo ""
+    echo "Press Enter to return to n8n control panel..."
+    read -r
+    show_n8n_control_menu
   fi
-  
-  echo ""
-  echo "N8N SERVICE:"
-  printf "  %-15s %s\n" "n8n Server:" "✅ Running (PID: $N8N_PID)"
-  
-  echo ""
-  echo "TIMESTAMP:"
-  printf "  %-15s %s\n" "Last scan:" "$STATUS_LAST_SCAN"
-  echo ""
-  echo "========================================================"
-  echo ""
-  echo "Press Enter to return to n8n control panel..."
-  read -r
-  show_n8n_control_menu
 }
 
 # Function to gracefully stop n8n
 stop_n8n() {
+  echo "🛑 Stopping n8n process..."
   if [ -n "$N8N_PID" ] && ps -p $N8N_PID > /dev/null; then
-    echo "Stopping n8n process (PID: $N8N_PID)..."
-    
-    # Try graceful shutdown first with n8n CLI if possible
-    if command -v n8n &>/dev/null; then
-      n8n stop &>/dev/null || true
-    fi
-
-    # If still running, send SIGTERM
-    if ps -p $N8N_PID > /dev/null; then
-      kill $N8N_PID &>/dev/null || true
-      sleep 1
-    fi
-    
-    # If still running, force kill
-    if ps -p $N8N_PID > /dev/null; then
-      kill -9 $N8N_PID &>/dev/null || true
-    fi
-    
-    N8N_RUNNING=false
-    echo "✅ n8n stopped"
-  else
-    echo "n8n is not running"
+    echo "   Attempting graceful shutdown via PID $N8N_PID..."
+    kill $N8N_PID &>/dev/null || true
+    sleep 2 # Wait for graceful shutdown
   fi
+
+  # Force kill any remaining n8n processes just in case
+  echo "   Ensuring all n8n processes are stopped..."
+  pkill -f "n8n start" || true
+  pkill -f "n8n worker" || true # Also kill worker processes if any
+
+  N8N_RUNNING=false
+  echo "✅ n8n stopped"
 }
 
 # Function to check latest n8n version
@@ -1012,12 +1219,6 @@ update_n8n() {
     fi
   fi
   
-  # Check current installation method
-  local update_method="global"
-  if [ -f "$N8N_DIR/package.json" ] && grep -q '"name": "n8n"' "$N8N_DIR/package.json"; then
-    update_method="local"
-  fi
-  
   # Get current version before update
   local old_version=""
   if command -v n8n &>/dev/null; then
@@ -1027,60 +1228,30 @@ update_n8n() {
     echo "n8n is not currently installed"
   fi
   
-  # Create temporary file to capture npm output
-  local tmp_output=$(mktemp)
-  
-  if [ "$update_method" = "global" ]; then
-    echo "Installing latest n8n version globally..."
-    # Capture both stdout and stderr from npm install
-    npm install -g n8n@latest 2>&1 | tee "$tmp_output"
-  else
-    echo "Installing latest n8n version in local directory..."
-    # Capture both stdout and stderr from npm install
-    (cd "$N8N_DIR" && npm install n8n@latest 2>&1 | tee "$tmp_output")
+  # Stop n8n if it's running
+  if [ "$N8N_RUNNING" = true ]; then
+    echo "Stopping n8n before update..."
+    stop_n8n
   fi
   
-  # Check for EBADENGINE warnings and extract required Node.js version
-  if grep -q "EBADENGINE" "$tmp_output"; then
-    echo ""
-    echo "⚠️ WARNING: Node.js version incompatibility detected!"
-    
-    # Try to extract the required Node.js version from the warning message
-    local required_version=$(grep -o "required:.*node: '>=.*'" "$tmp_output" | head -1 | grep -o ">=.*'" | tr -d "'," | cut -c3-)
-    
-    if [ -n "$required_version" ]; then
-      echo "📌 n8n components require Node.js $required_version or newer."
-      echo "   You're currently using Node.js $node_version"
-      
-      # Ask user if they want to upgrade Node.js version
-      echo ""
-      echo "Would you like to upgrade Node.js to version $required_version? (y/n)"
-      read -r node_upgrade_choice
-      
-      if [[ "$node_upgrade_choice" =~ ^[Yy]$ ]]; then
-        if load_nvm; then
-          echo "Installing Node.js $required_version..."
-          nvm install "$required_version"
-          nvm use "$required_version"
-          echo "✅ Node.js upgraded to $(node -v)"
-          echo "ℹ️ You should run n8n update again for best results."
-        else
-          echo "❌ Could not load nvm. Please upgrade Node.js manually."
+  # Try to update globally first
+  echo "Attempting to update n8n globally..."
+  if ! sudo npm install -g n8n@latest; then
+    echo "Global update failed, trying with sudo..."
+    if ! sudo npm install -g n8n@latest; then
+      echo "Global update failed, trying local update..."
+      if [ -f "$N8N_DIR/package.json" ]; then
+        cd "$N8N_DIR"
+        if ! npm install n8n@latest; then
+          echo "❌ All update attempts failed"
+          return 1
         fi
       else
-        echo "ℹ️ Continuing with current Node.js version. Some features may not work correctly."
+        echo "❌ Could not find package.json for local update"
+        return 1
       fi
     fi
   fi
-  
-  # Check for deprecated package warnings
-  if grep -q "deprecated" "$tmp_output"; then
-    echo ""
-    echo "ℹ️ Some packages used by n8n are deprecated. This is normal and doesn't affect functionality."
-  fi
-  
-  # Remove temporary file
-  rm -f "$tmp_output"
   
   # Verify the installation and version
   if command -v n8n &>/dev/null; then
@@ -1234,52 +1405,37 @@ handle_interrupt() {
   fi
 }
 
+# Initial setup before menu/arguments
+
+# Initialize log file
+echo "--- Script started at $(date) --- Session: $$" > "$LOG_FILE"
+
 # Initial system scan (silent)
-system_status_scan > /dev/null 2>&1
+system_status_scan >> "$LOG_FILE" 2>&1 # Log scan output as well
 
 # Process command line arguments
-if [ $# -eq 0 ]; then
-  # No arguments provided, show interactive menu
+if [ "$#" -eq 0 ]; then
   show_interactive_menu
+elif [ "$1" = "--make-it-work" ]; then
+  echo "Starting n8n with automatic configuration..."
+  system_status_scan
+  ensure_ollama_ready
+  start_n8n_with_control_menu
+elif [ "$1" = "--debug" ]; then
+  echo "Debug mode enabled. Running without menus..."
+  DEBUG_MODE=true
+  system_status_scan
+  ensure_ollama_ready
+  start_n8n_with_control_menu
+elif [ "$1" = "--silent" ]; then
+  echo "Silent mode enabled. Running 'just make it work' path..."
+  SILENT_MODE=true
+  system_status_scan
+  ensure_ollama_ready
+  start_n8n_with_control_menu
 else
-  # Arguments provided, process them
-  case "$1" in
-    --make-it-work)
-      just_make_it_work
-      ;;
-    --clean-locks)
-      clean_package_locks
-      exit 0
-      ;;
-    --regen-locks)
-      regenerate_package_locks
-      exit 0
-      ;;
-    --git-prep)
-      git_prep
-      exit 0
-      ;;
-    --update-n8n)
-      check_n8n_version
-      update_n8n
-      exit 0
-      ;;
-    --cleanup)
-      run_n8n_cleanup
-      exit 0
-      ;;
-    --reset-installation)
-      reset_n8n_installation
-      exit 0
-      ;;
-    --help)
-      show_help
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1"
-      show_help
-      exit 1
-      ;;
-  esac
+  show_help
 fi
+
+
+
